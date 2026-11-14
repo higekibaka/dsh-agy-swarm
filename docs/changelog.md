@@ -1,5 +1,18 @@
 # 变更日志
 
+## [0.1.2] - 2026-11-15
+
+### 改进 · 外部 `agy` 空轮次权限拒绝诊断（`deniedActions`）
+
+- 新增 `formatAgyEmptyTurnError(result)`：当外部 `agy` 轮次以 `completed` 结束但未调用 `post_message` 且无正文输出（象限 3）时，若 `result.deniedActions`（兼容 `denied_actions`）非空，自动提取被拒绝的工具名与原因追加到 `lastError`，不再一律只显示笼统的「未调用 `post_message` 且未输出任何文本」。
+- 严格有界与隐私脱敏：优先读取纯工具名 `name`（避免把可能带参数片段的 `tool` 摘要优先放入错误栏），对工具名与原因先经 `redactSensitiveText` 脱敏再分别限长（80 / 120 字符），按展示内容去重后最多保留 3 类并标注总次数；写入 `lastError` 时继续经 `redactErrorText` 统一限长 400 字符。
+- 零调度副作用：不改动 `dsh-agy-acp` 的终态成功判定契约，不触发隐式自动重跑；带 `deniedActions` 但正常输出文本或已发帖的轮次、以及 `failed` / `cancelled` 分支均保持原有行为不变。
+
+### 改进 · 外部 `agy` 队友信封与协调员派单边界提示
+
+- `buildAgyWorkerPromptEnvelope` 同时覆盖首轮与续聊信封，并按 `plan` 与非 `plan` 模式区分描述：`plan` 明确只读锁死，非 `plan` 保留分配范围内的工作区编辑说明；统一说明后台无交互子进程无法弹出额外权限审批（如 `run_command`、工作区外路径访问或用户全局挂载的其他第三方 MCP 工具请求审批时会被拒绝并可能中断当轮，被拒后应直接放弃而非换工具绕过），并说明独立进程无法把宿主 `.asar` 归档当目录读取且默认过滤 `.tmp/` 等点号隐藏目录，需通过 `post_message` `@` 原生队友代查。
+- `AGY_ACP_SKILL_SECTION` 补充协调员侧派单边界说明，避免将命令执行、外网检索或 `.asar` / `.tmp/` 读取任务误分派给后台外部 `agy` 队友。
+
 ## [0.1.1] - 2026-11-15
 
 ### 修复 · 设置页「未能读取宿主模型列表」

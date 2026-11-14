@@ -1,7 +1,7 @@
 {
   "name": "dsh-agy-swarm",
   "displayName": "Swarm Collaboration Cluster",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Multi-agent collaboration cluster for DeepSeek Harness: shared #seq message board, doorbell-based wakeups, zero-token sleeping, hot model switching, live feed/topology panel, and an optional Antigravity ACP teammate backend.",
   "license": "MIT",
   "author": "higekibaka",

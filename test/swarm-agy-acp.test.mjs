@@ -562,14 +562,28 @@ test('提示词：agy 信封说明 read_board / post_message、结轮即休眠�
   for (const needle of ['dsh_swarm_bridge', 'read_board', 'post_message', 'invoke_subagent', 'swarm_wait', 'BODY-1', '`plan`']) {
     assert.ok(initial.includes(needle), needle);
   }
+  for (const needle of ['run_command', '第三方 MCP', '.asar', '.tmp/', '切勿尝试换工具绕过']) {
+    assert.ok(initial.includes(needle), '初始 plan 信封需包含边界说明: ' + needle);
+  }
   const later = prompts.buildAgyWorkerPromptEnvelope({ member, coordinatorSessionId: 'c1', body: 'BODY-2' });
   assert.ok(later.includes('BODY-2'));
   assert.ok(later.length < initial.length, '后续轮次只发精简提醒');
+  for (const needle of ['`plan`', 'run_command', '第三方 MCP', '.asar', '.tmp/', '勿尝试绕过']) {
+    assert.ok(later.includes(needle), '续聊 plan 信封同样需保留精简边界: ' + needle);
+  }
+  const editMember = { ...member, name: 'smith', agyMode: 'accept-edits' };
+  const editInitial = prompts.buildAgyWorkerPromptEnvelope({ member: editMember, coordinatorSessionId: 'c1', body: 'EDIT-1', isInitial: true });
+  const editLater = prompts.buildAgyWorkerPromptEnvelope({ member: editMember, coordinatorSessionId: 'c1', body: 'EDIT-2' });
+  assert.ok(editInitial.includes('只修改分配给你的工作区内文件范围') && !editInitial.includes('锁死只读'));
+  assert.ok(editInitial.includes('fail-closed') && editInitial.includes('.asar'));
+  assert.ok(editLater.includes('`accept-edits`') && editLater.includes('仅修改分配的工作区内文件') && !editLater.includes('只读边界'));
+  assert.ok(editLater.length < editInitial.length);
   // 未安装可选扩展时，协调员规范里绝不能出现 agy 派发说明。
   assert.ok(!prompts.COORDINATOR_SKILL_CONTENT.includes('agy/'), '未挂载 ACP 时不得注入 agy/ 派发说明');
   assert.ok(!prompts.COORDINATOR_SKILL_CONTENT.includes('agy_mode'), '未挂载 ACP 时不得注入 agy_mode');
   const withAcp = prompts.buildCoordinatorSkillContent({ agyAcpAvailable: true });
   assert.ok(withAcp.includes('agy/') && withAcp.includes('agy_mode'), '挂载 ACP 后才拼接外部队友段落');
+  assert.ok(withAcp.includes('.asar') && withAcp.includes('第三方 MCP'), '协调员段落需提示外部 agy 派单边界');
   assert.ok(withAcp.startsWith(prompts.COORDINATOR_SKILL_CONTENT), '原生规范保持不变，仅追加可选段落');
   assert.equal(prompts.buildCoordinatorSkillContent({ agyAcpAvailable: false }), prompts.COORDINATOR_SKILL_CONTENT);
 });
@@ -1149,6 +1163,89 @@ test('象限 3 / 4：空白输出置 stopped；失败与抛错绝不代发残缺
     assert.match(judge.lastError, /boom/);
     assert.equal(judge.agySessionId, 'agy-sess-F2');
     assert.equal(harness.store.messages.some((m) => m.text.includes('PARTIAL')), false);
+  } finally {
+    await harness.cleanup([agy.stateDir]);
+  }
+});
+
+test('象限 3 诊断增强：空轮次附带 deniedActions 去重/限条数/脱敏摘要；正常回复或失败分支不受干扰', async () => {
+  assert.equal(swarm.formatAgyEmptyTurnError(null), swarm.AGY_EMPTY_TURN_MESSAGE);
+  assert.equal(swarm.formatAgyEmptyTurnError({ deniedActions: [] }), swarm.AGY_EMPTY_TURN_MESSAGE);
+
+  const secretHome = ['C:', 'Users', 'someone', 'secret-arg.txt'].join(path.sep);
+  const single = swarm.formatAgyEmptyTurnError({
+    deniedActions: [
+      {
+        name: 'run_command',
+        tool: 'run_command: Get-Content ' + secretHome + ' Bearer sk-secret-999999',
+        reason: '本轮以 plan 模式运行，一律拒绝副作用操作',
+      },
+    ],
+  });
+  assert.ok(single.startsWith(swarm.AGY_EMPTY_TURN_MESSAGE + '（本轮记录到权限拒绝：run_command — 本轮以 plan 模式运行'));
+  assert.ok(!single.includes('someone') && !single.includes('sk-secret'), '优先取 name，不泄露 tool 原始参数摘要');
+
+  const many = swarm.formatAgyEmptyTurnError({
+    deniedActions: [
+      { name: 'run_command', reason: 'r1' },
+      { name: 'run_command', reason: 'r1' },
+      { name: 'mcp_ext_docs_search', reason: 'r2' },
+      { name: 'write_file', reason: 'r3' },
+      { tool: 'fallback_tool --auth-file ' + secretHome, reason: 'Bearer tok-1234567890' },
+    ],
+  });
+  assert.match(many, /本轮记录到权限拒绝 5 次：run_command — r1；mcp_ext_docs_search — r2；write_file — r3 等/);
+  assert.ok(!many.includes('fallback_tool'), '超过 3 个去重类别时截断后续项');
+
+  const fallbackRedacted = swarm.formatAgyEmptyTurnError({
+    denied_actions: [{ tool: 'mcp --auth-file ' + secretHome, reason: 'Authorization: Bearer my-secret-token' }],
+  });
+  assert.ok(!fallbackRedacted.includes('someone') && !fallbackRedacted.includes('my-secret-token'));
+  assert.ok(fallbackRedacted.includes('[REDACTED]'));
+
+  const turns = [
+    () =>
+      completed('', {
+        deniedActions: [
+          { name: 'mcp_ext_search_docs', reason: '本轮以 plan 模式运行，一律拒绝副作用操作' },
+        ],
+      }),
+    () =>
+      completed('虽有工具被拒但已完成审查结论', {
+        deniedActions: [{ name: 'run_command', reason: '本轮以 plan 模式运行，一律拒绝副作用操作' }],
+      }),
+    () => ({
+      status: 'failed',
+      detail: 'ACP 异常中断',
+      outputText: '',
+      agySessionId: 'agy-sess-scripted',
+      deniedActions: [{ name: 'run_command', reason: '本轮以 plan 模式运行，一律拒绝副作用操作' }],
+    }),
+  ];
+  const agy = createScriptedAgy(async (_input, n) => turns[n - 1]());
+  const harness = createAgyHarness({ agySvc: agy.svc });
+  try {
+    await swarmAdd(harness, { name: 'architect', brief: '只读审查', model: 'agy/stub-model-alpha', agy_mode: 'plan' });
+    await harness.settle();
+    assert.equal(agy.calls.length, 1, '空轮次权限拒绝绝不隐式自动重跑');
+    let arch = harness.member('architect');
+    assert.equal(arch.state, 'stopped');
+    assert.ok(arch.lastError.startsWith(swarm.AGY_EMPTY_TURN_MESSAGE));
+    assert.match(arch.lastError, /mcp_ext_search_docs/);
+    assert.match(arch.lastError, /plan 模式/);
+
+    await coordPost(harness, '@architect 请改用工作区只读文件工具继续');
+    await harness.settle();
+    arch = harness.member('architect');
+    assert.equal(arch.state, 'waiting');
+    assert.equal(arch.lastError, '');
+    assert.ok(harness.store.messages.some((m) => m.agent === 'architect' && m.text.includes('已完成审查结论')));
+
+    await coordPost(harness, '@architect 测试失败分支优先级');
+    await harness.settle();
+    arch = harness.member('architect');
+    assert.equal(arch.state, 'stopped');
+    assert.equal(arch.lastError, 'ACP 异常中断', '失败分支以原失败原因为准，不被覆盖为空轮次文案');
   } finally {
     await harness.cleanup([agy.stateDir]);
   }

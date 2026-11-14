@@ -60,6 +60,7 @@ const AGY_ACP_SKILL_SECTION = `## 外部 agy 队友（可选扩展 dsh-agy-acp�
   - 模型写法：\`agy/<model>\`；可用条目与档位后缀以 \`swarm{action:"models"}\` 的实际输出为准（该扩展会在输出末尾列出 \`agy/…\` 条目，\`all:true\` 时探测真实目录），未知模型或锁档冲突会当场报错并列出可用模型。
   - \`agy_mode\`：父会话可写时默认 \`accept-edits\`；审查员请显式传 \`agy_mode:"plan"\` 锁死只读（plan 下仍可通过留言板发帖汇报）。父会话处于 Plan / 只读沙盒时强制 \`plan\`，显式传 \`accept-edits\` 会被拒绝。
   - 能力边界（显式拒绝，不会静默降级）：不支持 \`fork\`、不支持 \`workspace:"share"\`、不能担任 \`monitor\`；\`swarm{action:"model"}\` 只能在 \`agy/…\` 之间切换，不能与 DSH 原生模型互切。
+  - 派单边界：外部 agy 运行在后台无交互子进程中，除 \`dsh_swarm_bridge\` 外无法弹窗放行额外权限审批（如 \`run_command\`、工作区外路径访问或用户全局挂载的其他第三方 MCP 工具请求审批时会被拒绝），也无法将宿主 \`.asar\` 归档当作目录读取，且文件工具默认过滤点号隐藏目录（如 \`.tmp/\`）；需要执行命令、检索外网或查看上述特殊路径时，请在分工中交给原生 DSH 队友处理。
   - agy 队友每轮结束即自动休眠，被 \`@\` 时由宿主重新拉起一轮（续用同一 agy 会话）；若它漏调 \`post_message\`，其纯文本回复会被自动归档并 \`@\` 回触发者。阈值默认 **\`0\` = 无限不熔断**（自治内循环默认无限轮次）；仅当你在配置里显式设正整数时，连续被同伴互相唤醒或总轮次超过该阈值才触发熔断（成员转 \`stopped\` 并记录原因），届时由你裁决：\`@\` 它继续、\`swarm{action:"model"}\` 重新授权或 \`kill\`。`;
 
 const MONITOR_SKILL_CONTENT = `# swarm-monitor — 集群防卡死巡检守护员
@@ -132,6 +133,7 @@ function buildAgyWorkerPromptEnvelope({ member, coordinatorSessionId, body, isIn
   const channels =
     Array.isArray(member?.channels) && member.channels.length > 0 ? member.channels.join(', ') : 'main';
   const mode = member?.agyMode || 'plan';
+  const isPlanMode = mode === 'plan';
   const lines = ['<swarm_agy_worker>'];
   if (isInitial) {
     lines.push(
@@ -147,14 +149,21 @@ function buildAgyWorkerPromptEnvelope({ member, coordinatorSessionId, body, isIn
       '- 不要发“收到 / 开始处理”之类的空帖；第一条帖子就应是结论、交付物或具体阻塞提问。',
       '- 若你忘记调用 `post_message`，宿主会把你的最终纯文本回复自动归档并 `@` 回触发者——但请务必主动发帖，归档只是兜底。',
       '- **严禁调用 `invoke_subagent` 或任何后台子任务**：其结果无法回收，本轮会被判为失败。',
-      '- 只修改分配给你的文件范围；plan 模式下保持只读，只通过留言板汇报。',
+      isPlanMode
+        ? '- **只读与后台权限边界（`plan` 模式）**：本轮锁死只读，仅通过留言板汇报；除 `dsh_swarm_bridge` 外，任何触发权限审批的请求（如 `run_command`、写操作、工作区外路径访问或用户全局挂载的其他第三方 MCP 工具）都会被直接拒绝并可能中断本轮。若某项操作被权限拒绝，请直接放弃该动作、切勿尝试换工具绕过。'
+        : '- **工作区编辑与后台权限边界**：只修改分配给你的工作区内文件范围；本轮在后台无交互运行，除 `dsh_swarm_bridge` 外无法弹出额外权限审批（如 `run_command`、工作区外路径访问或用户全局挂载的其他第三方 MCP 工具一旦请求审批会被 fail-closed 拒绝并可能中断本轮；若被拒绝请直接放弃该动作，切勿尝试绕过）。',
+      '- **外部进程路径限制**：独立 agy 进程无法将宿主 `.asar` 归档当作目录读取，文件工具默认也会过滤点号隐藏目录（如 `.tmp/`）；需要执行命令、检索外网或查看上述特殊路径时，请用 `post_message` `@` 原生队友或 `@' + addedBy + '` 代查。',
       '- 自治内循环默认无限轮次（无 3 轮 / 12 跳上限）：与 @architect / @reviewer 在留言板内闭环返工，直到 100% 单测全绿；仅不可逆高危操作或需求取舍冲突才提前 @coordinator。',
       '- 模型选择：成员默认沿用宿主已配置的 DSH 路由；需要跨模型家族时由协调员显式指定 `provider/model`，本插件不内置任何模型白名单（用户在设置页勾选的派发权限清单会在此生效）。',
       ''
     );
   } else {
+    const modeReminder = isPlanMode
+      ? '后台 `plan` 只读边界：仅用工作区内只读文件工具与 `dsh_swarm_bridge`，勿调用 `run_command`、其他第三方 MCP 工具、工作区外路径或读取 `.asar`/`.tmp/`（需命令/外网/特殊路径请 `@` 原生队友代查；操作被拒时勿尝试绕过）。'
+      : '后台无交互边界：仅修改分配的工作区内文件，勿调用需额外审批的 `run_command`、其他第三方 MCP 工具、工作区外路径或读取 `.asar`/`.tmp/`（需命令/外网/特殊路径请 `@` 原生队友代查；操作被拒时勿尝试绕过）。';
     lines.push(
-      `你是 Swarm 外部 agy 队友 \`${name}\`。以下是唤醒你的新留言；处理完毕后用 \`post_message\`（带 \`@收件人\`）汇报并直接结束本轮即可休眠（无需 swarm_wait，严禁 invoke_subagent）。`,
+      `你是 Swarm 外部 agy 队友 \`${name}\`（模式：\`${mode}\`）。以下是唤醒你的新留言；处理完毕后用 \`post_message\`（带 \`@收件人\`）汇报并直接结束本轮即可休眠（无需 swarm_wait，严禁 invoke_subagent）。`,
+      modeReminder,
       ''
     );
   }

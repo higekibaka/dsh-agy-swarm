@@ -1131,6 +1131,59 @@ function redactActivityText(value, maxChars = 160) {
   return redactSensitiveText(value, { maxChars });
 }
 
+const MAX_AGY_DENIED_SUMMARY_ITEMS = 3;
+const MAX_AGY_DENIED_NAME_CHARS = 80;
+const MAX_AGY_DENIED_REASON_CHARS = 120;
+
+function collapseSingleLineText(value) {
+  return String(value ?? '').replace(/\s+/g, ' ').trim();
+}
+
+/**
+ * 将 `dsh-agy-acp` 返回的 `deniedActions` 整理为去重、限条数且脱敏的有界摘要。
+ * 优先取纯工具名 `name`（避免把可能带参数片段的 `tool` 摘要优先塞进错误栏）。
+ */
+function formatAgyDeniedActionsSummary(rawActions) {
+  const list = Array.isArray(rawActions) ? rawActions : [];
+  if (list.length === 0) return '';
+  const uniqueEntries = [];
+  const seen = new Set();
+  let validCount = 0;
+  for (const item of list) {
+    if (!item || typeof item !== 'object') continue;
+    const rawLabel =
+      collapseSingleLineText(item.name) || collapseSingleLineText(item.tool) || 'unknown';
+    const safeLabel = redactSensitiveText(rawLabel, { maxChars: MAX_AGY_DENIED_NAME_CHARS });
+    const rawReason = collapseSingleLineText(item.reason);
+    const safeReason = rawReason
+      ? redactSensitiveText(rawReason, { maxChars: MAX_AGY_DENIED_REASON_CHARS })
+      : '';
+    const entry = safeReason ? `${safeLabel} — ${safeReason}` : safeLabel;
+    validCount += 1;
+    if (!seen.has(entry)) {
+      seen.add(entry);
+      if (uniqueEntries.length < MAX_AGY_DENIED_SUMMARY_ITEMS) {
+        uniqueEntries.push(entry);
+      }
+    }
+  }
+  if (validCount === 0 || uniqueEntries.length === 0) return '';
+  const countTag = validCount > 1 ? ` ${validCount} 次` : '';
+  const moreTag = seen.size > uniqueEntries.length ? ' 等' : '';
+  return `本轮记录到权限拒绝${countTag}：${uniqueEntries.join('；')}${moreTag}`;
+}
+
+function formatAgyEmptyTurnError(result) {
+  const rawDenied = Array.isArray(result?.deniedActions)
+    ? result.deniedActions
+    : Array.isArray(result?.denied_actions)
+      ? result.denied_actions
+      : [];
+  const summary = formatAgyDeniedActionsSummary(rawDenied);
+  if (!summary) return AGY_EMPTY_TURN_MESSAGE;
+  return `${AGY_EMPTY_TURN_MESSAGE}（${summary}）`;
+}
+
 function parseToolArgumentsObject(raw) {
   if (!raw) return null;
   if (typeof raw === 'object' && !Array.isArray(raw)) return raw;
@@ -4206,12 +4259,12 @@ class SwarmHostController {
     }
 
     const trimmed = outputText.trim();
-    // 象限 3：空白静默异常
+    // 象限 3：空白静默异常（若有权限拒绝诊断则附上有界脱敏摘要，保留原 stopped 调度语义）
     if (!trimmed) {
       store.updateMemberRuntimeState(fresh.sessionId, {
         state: 'stopped',
         activity: '',
-        lastError: AGY_EMPTY_TURN_MESSAGE,
+        lastError: redactErrorText(formatAgyEmptyTurnError(result)),
       });
       this._wakeUnblockedWaiters(store);
       return;
@@ -5368,6 +5421,7 @@ module.exports = {
   AGY_AUTO_ARCHIVE_TAG,
   AGY_CIRCUIT_BREAK_MESSAGE,
   AGY_EMPTY_TURN_MESSAGE,
+  formatAgyEmptyTurnError,
   DEFAULT_MAX_CONSECUTIVE_PEER_WAKES,
   DEFAULT_MAX_AGY_TURNS_PER_MEMBER,
   SWARM_CONFIG_DEFAULTS,
