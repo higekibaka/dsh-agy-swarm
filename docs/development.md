@@ -55,10 +55,11 @@ test/                      主套件、开源友好度套件、可选集成套�
 
 ## 发布
 
-`.github/workflows/publish.yml` 是 `workflow_dispatch` 触发，带 `dry_run` 布尔输入：
+`.github/workflows/publish.yml` 支持推送版本标签（`v*`，例如 `git tag v0.1.2 && git push origin v0.1.2`）自动发布到 npm，并保留 `workflow_dispatch`（含 `dry_run` 选项）手动触发：
 
-1. `actions/checkout@v4` → `actions/setup-node@v4`（Node 22.19，对齐 `engines.node`，registry `https://registry.npmjs.org`）；
-2. `npm run check` + `npm run test:ci` + `npm pack --dry-run` 作为门禁；
-3. 正式发布走 `npm publish --provenance --access public`。
+1. `actions/checkout@v4` → `actions/setup-node@v4`（Node 22.19，对齐 `engines.node`，registry `https://registry.npmjs.org`）→ 升级 `npm@11`；
+2. 若由标签触发，校验标签 `vX.Y.Z` 与 `package.json` 的 `version` 一致；
+3. `npm run check` + `npm run test:ci` + `npm pack --dry-run` 作为门禁；
+4. 发布前检查 npm 是否已存在同版本（404 才上传），兼容 `secrets.NPM_TOKEN` 与 OIDC Trusted Publishing，正式发布走 `npm publish --provenance --access public`。
 
 包内容由 `package.json#files` 白名单控制，`test/` 与 `.github/` 不进入 tarball。

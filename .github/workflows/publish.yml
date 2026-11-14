@@ -1,6 +1,9 @@
 name: Publish package
 
 on:
+  push:
+    tags:
+      - 'v*'
   workflow_dispatch:
     inputs:
       dry_run:
@@ -9,6 +12,10 @@ on:
         default: false
         type: boolean
 
+concurrency:
+  group: npm-publish-${{ github.repository }}
+  cancel-in-progress: false
+
 permissions:
   contents: read
   id-token: write
@@ -16,6 +23,7 @@ permissions:
 jobs:
   publish:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
@@ -26,6 +34,23 @@ jobs:
           node-version: '22.19'
           registry-url: 'https://registry.npmjs.org'
 
+      - name: Upgrade npm for OIDC Trusted Publishing
+        run: npm install -g npm@11
+
+      - name: Validate release tag matches package.json
+        if: github.event_name == 'push'
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]] || {
+            echo "Expected semver tag vX.Y.Z, got: $TAG"
+            exit 1
+          }
+          PKG_VER="$(node -p "require('./package.json').version")"
+          if [ "${TAG#v}" != "$PKG_VER" ]; then
+            echo "Tag $TAG does not match package.json version $PKG_VER"
+            exit 1
+          fi
+
       - name: Syntax check, tests and package preview
         run: |
           npm run check
@@ -34,10 +59,32 @@ jobs:
 
       - name: Publish to npm
         env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          NPM_TOKEN_INPUT: ${{ secrets.NPM_TOKEN }}
         run: |
           if [ "${{ inputs.dry_run }}" = "true" ]; then
             npm publish --dry-run --access public
-          else
-            npm publish --provenance --access public
+            exit 0
           fi
+
+          PKG_NAME="$(node -p "require('./package.json').name")"
+          PKG_VER="$(node -p "require('./package.json').version")"
+          STATUS_CODE="$(curl -s -o /dev/null -w '%{http_code}' "https://registry.npmjs.org/${PKG_NAME}/${PKG_VER}")"
+          if [ "$STATUS_CODE" = "200" ]; then
+            echo "${PKG_NAME}@${PKG_VER} is already published on npm. Skipping upload."
+            exit 0
+          fi
+          if [ "$STATUS_CODE" != "404" ]; then
+            echo "Unexpected npm registry lookup HTTP $STATUS_CODE for ${PKG_NAME}@${PKG_VER}"
+            exit 1
+          fi
+
+          if [ -n "$NPM_TOKEN_INPUT" ]; then
+            export NODE_AUTH_TOKEN="$NPM_TOKEN_INPUT"
+          else
+            # Clear empty _authToken placeholder written by setup-node so npm 11 uses OIDC Trusted Publishing.
+            if [ -f "$HOME/.npmrc" ]; then
+              sed -i '/_authToken=/d' "$HOME/.npmrc"
+            fi
+          fi
+
+          npm publish --provenance --access public
