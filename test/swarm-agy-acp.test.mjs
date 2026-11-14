@@ -456,36 +456,42 @@ test('resolveAgyPolicy：父会话 Plan / 只读强制 plan 且拒绝 accept-edi
 });
 
 test('resolveNodeExecutable：纯 Node 直用 execPath；Electron 回落宿主捆绑 node / resolveExecutable / 报错', async () => {
+  const exe = process.platform === 'win32' ? 'node.exe' : 'node';
+  const fsRoot = path.parse(process.cwd()).root;
+  const plainNode = path.join(fsRoot, 'node-bin', exe);
   assert.equal(
-    await swarm.resolveNodeExecutable({ execPath: 'C:\\node\\node.exe', versions: {}, existsSync: () => true }),
-    'C:\\node\\node.exe'
+    await swarm.resolveNodeExecutable({ execPath: plainNode, versions: {}, existsSync: () => true }),
+    plainNode
   );
-  const bundled = path.resolve('C:\\DSH', 'resources/runtime/primary-runtime/dependencies/node/bin', 'node.exe');
+  const dshRoot = path.join(fsRoot, 'dsh-app');
+  const dshExe = path.join(dshRoot, process.platform === 'win32' ? 'dsh.exe' : 'dsh');
+  const bundled = path.resolve(dshRoot, 'resources/runtime/primary-runtime/dependencies/node/bin', exe);
   assert.equal(
     await swarm.resolveNodeExecutable({
-      execPath: 'C:\\DSH\\dsh.exe',
+      execPath: dshExe,
       versions: { electron: '33.0.0' },
-      platform: 'win32',
+      platform: process.platform,
       existsSync: (p) => p === bundled,
     }),
     bundled
   );
+  const toolNode = path.join(fsRoot, 'tools', exe);
   assert.equal(
     await swarm.resolveNodeExecutable({
-      execPath: 'C:\\DSH\\dsh.exe',
+      execPath: dshExe,
       versions: { electron: '33.0.0' },
-      platform: 'win32',
+      platform: process.platform,
       existsSync: () => false,
-      subprocess: { resolveExecutable: async (name) => (name === 'node' ? 'D:\\tools\\node.exe' : null) },
+      subprocess: { resolveExecutable: async (name) => (name === 'node' ? toolNode : null) },
     }),
-    'D:\\tools\\node.exe'
+    toolNode
   );
   await assert.rejects(
     () =>
       swarm.resolveNodeExecutable({
-        execPath: 'C:\\DSH\\dsh.exe',
+        execPath: dshExe,
         versions: { electron: '33.0.0' },
-        platform: 'win32',
+        platform: process.platform,
         existsSync: () => false,
       }),
     /纯 Node 可执行文件/
