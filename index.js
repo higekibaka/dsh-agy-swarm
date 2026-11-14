@@ -860,12 +860,24 @@ function fenceAroundText(text) {
   return `${fence}text\n${text}\n${fence}`;
 }
 
+/**
+ * Host dependency loader with a zero-dependency fallback.
+ *
+ * Desktop DSH bundles every `@deepseek-ai/*` runtime package inside its
+ * Electron archive, so a plain `require` from the plugin directory raises
+ * MODULE_NOT_FOUND and the plugin silently degraded to its hand-written
+ * fallbacks. `runtime.requireHostModule` first tries the plain `require`
+ * (profile-hoisted layouts), then resolves the specifier against host entry
+ * anchors (the desktop runtime's own node_modules, CLI layouts, ...) and
+ * requires that entry by path. The archive layout knowledge lives only in
+ * `runtime.js`; nothing here spawns a process or reads the archive directly.
+ *
+ * Missing / ESM-only / unreadable modules still return `null`, so every
+ * caller keeps its fallback and the pure-Node offline suite stays
+ * dependency-free — no host package is ever required for the plugin to boot.
+ */
 function tryRequire(specifier) {
-  try {
-    return require(specifier);
-  } catch {
-    return null;
-  }
+  return runtime.requireHostModule(specifier);
 }
 
 /**
@@ -4718,58 +4730,68 @@ function mountSwarmRemoteService(ctx, controller) {
 
   const attachRemotePrototypeMarkers = (Proto) => {
     if (typertProto && typeof typertProto.Remote === 'function') {
-      let initGet;
-      typertProto.Remote(Proto.getSwarmSnapshot, {
-        name: 'getSwarmSnapshot',
-        private: false,
-        static: false,
-        addInitializer(fn) {
-          initGet = fn;
-        },
-      });
-      let initWatch;
-      const streamDec = typertProto.Remote({ mode: 'stream' });
-      streamDec(Proto.watchSwarm, {
-        name: 'watchSwarm',
-        private: false,
-        static: false,
-        addInitializer(fn) {
-          initWatch = fn;
-        },
-      });
-      let initModels;
-      typertProto.Remote(Proto.getSwarmModels, {
-        name: 'getSwarmModels',
-        private: false,
-        static: false,
-        addInitializer(fn) {
-          initModels = fn;
-        },
-      });
-      return { initGet, initWatch, initModels };
+      // 宿主协议的装饰器会做名称 / 上下文字段校验；版本漂移时退回手写描述符，
+      // 绝不能因为一个可选元数据步骤让整个 Swarm 服务挂不上。
+      try {
+        let initGet;
+        typertProto.Remote(Proto.getSwarmSnapshot, {
+          name: 'getSwarmSnapshot',
+          private: false,
+          static: false,
+          addInitializer(fn) {
+            initGet = fn;
+          },
+        });
+        let initWatch;
+        const streamDec = typertProto.Remote({ mode: 'stream' });
+        streamDec(Proto.watchSwarm, {
+          name: 'watchSwarm',
+          private: false,
+          static: false,
+          addInitializer(fn) {
+            initWatch = fn;
+          },
+        });
+        let initModels;
+        typertProto.Remote(Proto.getSwarmModels, {
+          name: 'getSwarmModels',
+          private: false,
+          static: false,
+          addInitializer(fn) {
+            initModels = fn;
+          },
+        });
+        return { initGet, initWatch, initModels };
+      } catch {
+        // fall through to the hand-written descriptor below
+      }
     }
 
-    Object.defineProperty(Proto, REMOTE_METHOD_DESCRIPTOR_KEY, {
-      configurable: true,
-      value: Object.freeze({
-        version: 1,
-        methods: Object.freeze([
-          Object.freeze({
-            method: 'getSwarmSnapshot',
-            invocation: Object.freeze({ kind: 'direct' }),
-          }),
-          Object.freeze({
-            method: 'watchSwarm',
-            mode: 'stream',
-            invocation: Object.freeze({ kind: 'direct' }),
-          }),
-          Object.freeze({
-            method: 'getSwarmModels',
-            invocation: Object.freeze({ kind: 'direct' }),
-          }),
-        ]),
-      }),
-    });
+    try {
+      Object.defineProperty(Proto, REMOTE_METHOD_DESCRIPTOR_KEY, {
+        configurable: true,
+        value: Object.freeze({
+          version: 1,
+          methods: Object.freeze([
+            Object.freeze({
+              method: 'getSwarmSnapshot',
+              invocation: Object.freeze({ kind: 'direct' }),
+            }),
+            Object.freeze({
+              method: 'watchSwarm',
+              mode: 'stream',
+              invocation: Object.freeze({ kind: 'direct' }),
+            }),
+            Object.freeze({
+              method: 'getSwarmModels',
+              invocation: Object.freeze({ kind: 'direct' }),
+            }),
+          ]),
+        }),
+      });
+    } catch {
+      // 原型不可扩展 / 已有不可重定义描述符：服务本身依旧可用，放弃元数据声明。
+    }
     return null;
   };
 
@@ -4805,7 +4827,12 @@ function mountSwarmRemoteService(ctx, controller) {
       initializers.initWatch?.call(protoProxy);
       initializers.initModels?.call(protoProxy);
     }
-    return new SwarmRemoteService(ctx);
+    try {
+      return new SwarmRemoteService(ctx);
+    } catch {
+      // 宿主 Cordis / Typert 契约漂移（例如 TypertRemoteService 构造签名变化）时
+      // 退回插件自带实现：degrade gracefully，绝不让 apply 直接抛错。
+    }
   }
 
   class SwarmRemoteServiceFallback {

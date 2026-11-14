@@ -5,12 +5,14 @@
 - Node `^22.19.0 || >=24.0.0`
 - DSH 宿主（`engines.dsh: >=0.2.2-rc.1`）
 - Windows 沙盒下跑 `node --test` **必须**带 `--test-isolation=none`：受限令牌下子进程命名管道会 `spawn EPERM`
+- 反之 Linux / macOS（CI）不需要该参数，且 Node 22.13 之前不认它（`exit code 9`），所以 CI 统一用 `npm run test:ci`
 
 ## 本地检查
 
 ```bash
 npm run check    # node --check 全量源码
-npm test         # 离线主套件
+npm test         # 离线主套件（Windows 沙盒：含 --test-isolation=none）
+npm run test:ci  # 同上但不带 --test-isolation，供 Linux / macOS CI 使用
 npm pack --dry-run --json
 ```
 
@@ -55,8 +57,8 @@ test/                      主套件、开源友好度套件、可选集成套�
 
 `.github/workflows/publish.yml` 是 `workflow_dispatch` 触发，带 `dry_run` 布尔输入：
 
-1. `actions/checkout@v4` → `actions/setup-node@v4`（Node 22，registry `https://registry.npmjs.org`）；
-2. `npm run check` + `npm pack --dry-run` 作为门禁；
+1. `actions/checkout@v4` → `actions/setup-node@v4`（Node 22.19，对齐 `engines.node`，registry `https://registry.npmjs.org`）；
+2. `npm run check` + `npm run test:ci` + `npm pack --dry-run` 作为门禁；
 3. 正式发布走 `npm publish --provenance --access public`。
 
 包内容由 `package.json#files` 白名单控制，`test/` 与 `.github/` 不进入 tarball。

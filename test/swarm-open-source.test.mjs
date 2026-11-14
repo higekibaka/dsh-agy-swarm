@@ -1160,3 +1160,171 @@ test('模型派发权限：默认配置、工具 Schema 与提示词零私人模
   );
 });
 
+/* ---- 回归：宿主一元 Remote 的 { ok, value } 信封 ----------------------- */
+
+/**
+ * 真实宿主 @deepseek-ai/dsh-api-gateway 的一元 Remote 调用在**成功**时返回
+ * `{ ok: true, value: <payload> }`（失败时 `{ ok: false, error }`）。
+ * 设置页曾经把整封响应直接交给 `parseSwarmModelsResult`，于是
+ * `Array.isArray(response.models)` 永远为假，设置页固定报
+ * 「未能读取宿主模型列表」——本用例锁死解包行为。
+ */
+test('设置页：宿主 { ok: true, value } 信封必须先解包，否则报 models must be an array', async () => {
+  const envelopeModels = [
+    { key: 'vendor/model-a', provider: 'vendor', model: 'model-a', name: 'A', backend: 'dsh', allowed: true, blocked: false },
+    { key: 'vendor/model-b', provider: 'vendor', model: 'model-b', name: 'B', backend: 'dsh', allowed: true, blocked: false },
+  ];
+
+  // 1) 纯函数层：带信封的响应直接过校验必然失败，解包后才通过
+  assert.throws(
+    () => clientMod.parseSwarmModelsResult({ ok: true, value: { models: envelopeModels } }),
+    /models must be an array/,
+    '未解包的信封必须复现原始故障'
+  );
+  assert.deepEqual(clientMod.unwrapRemoteResult({ ok: true, value: { models: envelopeModels } }), { models: envelopeModels });
+  assert.equal(clientMod.unwrapRemoteResult(envelopeModels), envelopeModels, '裸结果（Fallback 服务）必须原样透传');
+  assert.equal(clientMod.unwrapRemoteResult({ ok: false, error: { message: 'boom' } }).ok, false, '失败信封保持原样，交给错误分支');
+  assert.equal(clientMod.unwrapRemoteResult(undefined), undefined);
+  assert.deepEqual(
+    clientMod.parseSwarmModelsResult(clientMod.unwrapRemoteResult({ ok: true, value: { models: envelopeModels } })).models.map((m) => m.key),
+    ['vendor/model-a', 'vendor/model-b']
+  );
+
+  // 2) 插件层：把真实信封塞给 api.getSwarmModels，设置页 loadModels() 必须拿到全量模型
+  const mockReact = {
+    Fragment: Symbol('Fragment'),
+    createElement: (type, props, ...children) => ({ type, props: props || {}, children }),
+    useState: (init) => [typeof init === 'function' ? init() : init, () => {}],
+    useEffect: () => {},
+    useMemo: (fn) => fn(),
+    useCallback: (fn) => fn,
+    useRef: (value) => ({ current: value }),
+    useSyncExternalStore: (subscribe, getSnapshot) => getSnapshot(),
+  };
+  const calls = [];
+  const api = {
+    async getSwarmModels(request) {
+      calls.push(request);
+      return { ok: true, value: { models: envelopeModels } };
+    },
+    async getSwarmSnapshot() {
+      throw new Error('本用例不应拉取快照');
+    },
+  };
+  const settings = [];
+  const ctx = {
+    slots: {
+      inject(name, cb) {
+        return cb();
+      },
+      register(spec, comp) {
+        if (spec.name === 'settings.section') settings.push({ spec, comp });
+        return () => {};
+      },
+    },
+    resources: { register: () => () => {} },
+    sidebarRightTabs: { register: () => () => {} },
+    sidebarRight: { openResource() {} },
+    configForms: {
+      get: (id) => ({
+        namespace: id,
+        getSnapshot: () => ({ status: 'ready', writable: true, value: {} }),
+        subscribe: () => () => {},
+        set: () => true,
+      }),
+      whileServed(namespaces, register) {
+        const off = register(new Set([clientMod.SWARM_SETTINGS_ID]));
+        return () => {
+          if (typeof off === 'function') off();
+        };
+      },
+    },
+    locale: { register: () => () => {}, bind: () => (key) => key },
+    'dsh-swarm': api,
+    effect(fn) {
+      const off = fn();
+      return () => {
+        if (typeof off === 'function') off();
+      };
+    },
+    get(name) {
+      return this[name];
+    },
+  };
+  const plugin = new clientMod.SwarmClientPlugin(ctx, { React: mockReact });
+  try {
+    assert.equal(settings.length, 1, '设置页必须挂载');
+    const injected = settings[0].spec.inject();
+    assert.equal(typeof injected.loadModels, 'function');
+    const list = await injected.loadModels();
+    assert.deepEqual(list.map((m) => m.key), ['vendor/model-a', 'vendor/model-b'], '解包后必须返回全量宿主模型目录');
+    assert.deepEqual(calls, [{ probeAgy: false }], '模型目录拉取必须保持零子进程');
+  } finally {
+    await plugin.dispose();
+  }
+
+  // 3) 仍然失败时：status 只显示本地化摘要，真实原因保留在 tooltip（modelsError）
+  const findStatus = (tree) => flattenTree(tree).find((n) => n.props && n.props['data-role'] === 'models-status');
+  /**
+   * 每个组件一份独立的 hook 槽位（共享槽位会让上一个组件的失败态串味），
+   * useEffect 同步触发、promise 在下一拍落地，然后重渲染读状态。
+   */
+  const makeSectionHarness = (loadModels) => {
+    const hookValues = [];
+    let hookIndex = 0;
+    const React = {
+      ...mockReact,
+      useEffect: (fn) => {
+        try {
+          fn();
+        } catch {
+          // ignore
+        }
+      },
+      useState: (init) => {
+        const slot = hookIndex++;
+        if (!(slot in hookValues)) hookValues[slot] = typeof init === 'function' ? init() : init;
+        return [
+          hookValues[slot],
+          (next) => {
+            hookValues[slot] = typeof next === 'function' ? next(hookValues[slot]) : next;
+          },
+        ];
+      },
+    };
+    const form = {
+      getSnapshot: () => ({ status: 'ready', writable: true, value: {} }),
+      subscribe: () => () => {},
+      set: () => true,
+    };
+    const Section = clientMod.createSwarmSettingsSection(React, React.createElement);
+    return {
+      render: () => {
+        hookIndex = 0;
+        return Section({ form, t: (key) => key, loadModels });
+      },
+    };
+  };
+
+  const failing = makeSectionHarness(async () => {
+    throw new Error('dsh-swarm invalid models response: models must be an array');
+  });
+  failing.render();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  const failedStatus = findStatus(failing.render());
+  assert.ok(failedStatus, '必须有模型目录状态行');
+  assert.deepEqual(failedStatus.children, ['modelsUnavailable'], '失败时仍是本地化摘要文案');
+  assert.match(String(failedStatus.props.title || ''), /models must be an array/, '真实原因必须放进 tooltip');
+  assert.match(String(failedStatus.props['data-models-error'] || ''), /models must be an array/);
+  assert.match(String(failedStatus.props.className || ''), /is-error/);
+
+  // 拉取成功时不得残留错误提示（tooltip 与 is-error 都要清掉）
+  const succeeding = makeSectionHarness(async () => envelopeModels);
+  succeeding.render();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  const okStatus = findStatus(succeeding.render());
+  assert.equal(okStatus.props.title, undefined, '无错时不得残留 tooltip');
+  assert.equal(okStatus.props['data-models-error'], undefined);
+  assert.ok(!String(okStatus.props.className || '').includes('is-error'));
+});
+

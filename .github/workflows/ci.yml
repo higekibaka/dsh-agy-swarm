@@ -15,7 +15,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        node: ['22', '24']
+        # 22.19 对齐 package.json 的 engines.node（^22.19.0）：Node 22.13 之前不认 `--test-isolation`，
+        # 会以 exit code 9（Invalid Argument）把 CI 直接打挂。
+        node: ['22.19', '24']
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
@@ -29,7 +31,8 @@ jobs:
         run: npm run check
 
       - name: Offline test suite
-        run: npm test
+        # Linux / macOS 没有 Windows 沙盒的命名管道限制，套件之间无需共享进程隔离。
+        run: npm run test:ci
 
       - name: Package preview
         run: npm pack --dry-run

@@ -1596,6 +1596,18 @@ test('6. In-process SDK contract verification (no app.asar subprocess probe)', a
     assert.ok(!code.includes('app.asar'), 'plugin source must not reference app.asar');
     assert.ok(!code.includes('dsh-client-ui-primitives'), 'private UI primitives are forbidden');
   }
+  // runtime.js 是「宿主归档布局」的唯一知情点：桌面版的 @deepseek-ai/* 全在归档内，
+  // 它只按路径 resolve + require 宿主模块。原始禁令（不得通过子进程执行归档内容）
+  // 依旧成立，因此这里额外锁死：index.js / runtime.js 都不得引入 child_process。
+  const runtimeCode = fs.readFileSync(path.join(PLUGIN_ROOT, 'runtime.js'), 'utf8');
+  assert.ok(runtimeCode.includes('app.asar'), 'host module resolver must know the desktop archive layout');
+  for (const code of [indexCode, runtimeCode]) {
+    assert.ok(
+      !/require\(\s*['"](?:node:)?child_process['"]\s*\)/.test(code),
+      'host archive may only be resolved by path, never executed through a child process'
+    );
+    assert.ok(!/\bexecFile\b|\bspawnSync\b/.test(code), 'no synchronous archive probing');
+  }
   // Safety-critical shapes stay present in the shipped sources.
   assert.match(indexCode, /subagent\/descriptor/);
   assert.match(indexCode, /sandbox\/mode/);

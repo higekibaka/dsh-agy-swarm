@@ -1,12 +1,33 @@
 # 变更日志
 
-## 未发布
+## [0.1.1] - 2026-11-15
+
+### 修复 · 设置页「未能读取宿主模型列表」
+
+- 真实宿主 `@deepseek-ai/dsh-api-gateway` 的一元 Remote 调用在**成功**时返回 `{ ok: true, value: <payload> }` 信封（失败时 `{ ok: false, error }`）。此前设置页把整封响应当载荷直接交给 `parseSwarmModelsResult`，`Array.isArray(response.models)` 恒为假，于是永远报「未能读取宿主模型列表」并且只留下一句 `models must be an array` 的内部错误。
+- 新增 `unwrapRemoteResult(res)`：`isPlainObject(res) && res.ok === true && 'value' in res && res.value !== undefined` 时取 `res.value`，否则原样透传（插件自带的 `SwarmRemoteServiceFallback` 与离线单测替身返回裸结果，必须同样可用）。`loadSwarmModels` 与 `fetchSnapshotOnce` 统一先解包再交给校验 / 归一化函数。
+- 设置页仍拉取失败时保留简化可读的错误摘要（`modelsError`）：状态行文字维持本地化提示，真实原因（截断为单行 240 字内）挂在 `title` 与 `data-models-error` 上，便于区分「宿主流未挂载」与「协议校验失败」；拉取成功或重试成功即清空。
+- 新增回归：注入真实 `{ ok: true, value: { models: [...] } }` 信封给 `api.getSwarmModels`，设置页 `loadModels()` 必须解包返回全量模型；同时覆盖「裸结果透传」「失败信封不被误解包」与错误 tooltip 的出现 / 清空。
+
+### 修复 · Host 依赖加载脱节（`MODULE_NOT_FOUND` 退回 Fallback）
+
+- 桌面 Profile 里 `require('@deepseek-ai/dsh-typert-protocol')` / `dsh-tools` / `dsh-scope` / `dsh-llm` / `dsh-session` 全部 `MODULE_NOT_FOUND`：这些包只在 `<resourcesPath>/app.asar/dsh/node_modules` 里，插件目录解析不到，于是 `index.js` 静默退回手写 Fallback（工具定义、fork 种子、中继消息、Typert 远程服务全部降级）。
+- `runtime.js` 的宿主锚点升级：除环境变量与 `require.main` / `process.argv[1]` 外，新增 `<resourcesPath>/app.asar/{dsh,lib}` 锚点，并把入口文件所在目录的若干层祖先一并当锚点，覆盖桌面版 / CLI / 便携包布局，仍然零硬编码安装路径。
+- 新增 `runtime.requireHostModule(specifier)`：先普通 `require`（依赖被提升到 profile 的布局），失败则 `resolveHostModule` 定位宿主 `app.asar` 入口再 `require(entry)`；`ERR_REQUIRE_ESM`、asar 读取失败等一律返回 `null`（结果含失败一并缓存），调用方继续走兜底，**绝不因为可选依赖缺失而崩溃**。`index.js` 的 `tryRequire` 改为委托它；`loadSchemastery` 复用同一条链路。
+- `mountSwarmRemoteService` 加固：真实 `typertProto.Remote` 装饰器失败时退回手写 `remote-methods` 描述符；`new SwarmRemoteService(ctx)` 抛错（宿主 Cordis / Typert 契约漂移）时退回 `SwarmRemoteServiceFallback`；描述符定义失败也不再影响服务本身。
+- 纯 Node 离线单测零依赖兜底 100% 保留：无 `resourcesPath`、无 `@deepseek-ai/*` 时所有解析都返回 `null`，全部用例仍跑在兜底实现上。
+
+### 修复 · GitHub Actions 在 Node 22 报 `exit code 9`
+
+- `npm test` 里的 `--test-isolation=none` 是为 Windows 沙盒（命名管道 `spawn EPERM`）准备的；Linux/macOS 并不需要，而 Node 22.13 之前的版本不认这个参数，会以 `exit code 9`（Invalid Argument）直接失败。
+- `package.json` 新增 `"test:ci"`（不带 `--test-isolation`），保留 `"test"` 兼容 Windows 沙盒；`ci.yml` 与 `publish.yml` 的测试步改调 `npm run test:ci`。
+- Matrix 的 `22` 改为 `22.19`，对齐 `engines.node` 的 `^22.19.0`，避免 setup-node 拉到 22.13 以下的小版本。
 
 ### 修复 · 严格白名单空名单的权限反转
 
 - 新增持久化开关 `strictAllowlist`（默认 `false`）：白名单激活条件改为「`strictAllowlist === true` 或 `allowedModels` 非空」。此前「严格模式下取消最后一个勾选」会写入 `allowedModels: []`，被误判成「未启用白名单 → 全部放行」，权限方向反转；现在空名单一律**全禁**，报错明确提示「已启用严格白名单模式但允许列表为空」。
-- 设置页开关改为先写 `strictAllowlist` 再写 `allowedModels`（关闭时相反），任一步保存失败即回滚开关并显示保存失败，绝不停留在未落盘的开关状态。
-- 新增 4 项回归：取消最后一个勾选、移除最后一个白名单胶囊、空目录开启严格模式、保存失败不误显示。
+- 设置页开关与白名单写入路径均改为先持久化 `strictAllowlist` 再更新 `allowedModels`（包括 legacy 仅非空名单激活时清空最后一项，也会先钉住 `strictAllowlist: true`；关闭时先写 `strictAllowlist: false` 再清空），任一步保存失败即回滚到已持久化快照并显示保存失败，绝不停留在未落盘的开关状态。
+- 新增 5 项设置页回归（含取消最后一个勾选、移除最后一个白名单胶囊、空目录开启严格模式、legacy 仅非空名单清空、保存失败不误显示）以及对应 Host / 协议回归。
 
 ### 新增 · 可视化模型派发权限
 

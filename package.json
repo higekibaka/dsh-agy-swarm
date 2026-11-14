@@ -1,7 +1,7 @@
 {
   "name": "dsh-agy-swarm",
   "displayName": "Swarm Collaboration Cluster",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Multi-agent collaboration cluster for DeepSeek Harness: shared #seq message board, doorbell-based wakeups, zero-token sleeping, hot model switching, live feed/topology panel, and an optional Antigravity ACP teammate backend.",
   "license": "MIT",
   "author": "higekibaka",
@@ -118,6 +118,7 @@
   "icon": "./icon.svg",
   "scripts": {
     "test": "node --test --test-isolation=none test/swarm.test.mjs test/swarm-agy-acp.test.mjs test/swarm-open-source.test.mjs",
+    "test:ci": "node --test test/swarm.test.mjs test/swarm-agy-acp.test.mjs test/swarm-open-source.test.mjs",
     "test:acp-integration": "node --test --test-isolation=none test/agy-acp-integration.test.mjs",
     "check": "node --check index.js && node --check client.js && node --check runtime.js && node --check src/protocol.js && node --check src/board-store.js && node --check src/prompts.js && node --check src/redaction.js && node --check src/mcp-bridge-server.js && node --check src/mcp-stdio-entry.js"
   }

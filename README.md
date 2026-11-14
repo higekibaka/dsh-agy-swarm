@@ -137,12 +137,13 @@ docs/                     配置、参考、开发与变更日志
 
 ```bash
 npm run check                                   # 全量 node --check
-npm test                                        # 离线主套件（含内置 ACP 替身）
+npm test                                        # 离线主套件（含内置 ACP 替身；Windows 沙盒用）
+npm run test:ci                                 # 同一套件的 CI 版，不带 --test-isolation
 npm run test:acp-integration                    # 可选：真实 dsh-agy-acp 端到端
 npm pack --dry-run --json                       # 打包清单预演
 ```
 
-Windows 沙盒环境跑 `node --test` 必须带 `--test-isolation=none`（子进程命名管道在受限令牌下会 `spawn EPERM`）。
+Windows 沙盒环境跑 `node --test` 必须带 `--test-isolation=none`（子进程命名管道在受限令牌下会 `spawn EPERM`）；Linux / macOS 反而不能带（Node 22.13 之前不认该参数，会以 `exit code 9` 失败），CI 因此统一走 `npm run test:ci`。
 
 ## 许可
 

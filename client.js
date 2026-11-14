@@ -235,6 +235,20 @@
     return value !== null && typeof value === 'object' && !Array.isArray(value);
   }
 
+  /**
+   * 解包一元 Remote（Remote 直调）调用的宿主响应信封。
+   *
+   * `@deepseek-ai/dsh-api-gateway` 会把一元 Remote 的结果包成 `{ ok: true, value }`；
+   * 插件自带的 `SwarmRemoteServiceFallback`（以及离线单测里的替身）直接返回裸结果。
+   * 两种形态都必须接受，否则带信封的响应会被 `parseSwarmModelsResult` /
+   * `normalizeSwarmSnapshot` 判成非法载荷（典型症状：设置页报
+   * "models must be an array"）。
+   */
+  function unwrapRemoteResult(res) {
+    if (isPlainObject(res) && res.ok === true && 'value' in res && res.value !== undefined) return res.value;
+    return res;
+  }
+
   function safeDecodeSegment(segment) {
     if (typeof segment !== 'string' || segment === '') return null;
     try {
@@ -1307,6 +1321,22 @@
     return String(error);
   }
 
+  /**
+   * 模型目录拉取失败的原因摘要：压成单行并限长，只用于设置页 status 的 tooltip，
+   * 既方便排查（例如宿主流未挂载 / 协议校验失败），又不会把长堆栈塞进 DOM。
+   */
+  function describeModelsError(error) {
+    let text = '';
+    try {
+      text = formatErrorMessage(error);
+    } catch {
+      text = '';
+    }
+    text = String(text || '').replace(/\s+/g, ' ').trim();
+    if (!text) return 'unknown error';
+    return text.length > 240 ? text.slice(0, 237) + '...' : text;
+  }
+
   function makeRemoteFailureFrame(code, message, details) {
     const error = new Error(message);
     error.name = 'RemoteError';
@@ -1469,6 +1499,8 @@
         Array.isArray(props?.models) ? props.models.map(normalizeSwarmModelEntry) : null
       );
       const [modelsStatus, setModelsStatus] = useState('');
+      /** 拉取失败时的可读原因（单行摘要，挂在 status 的 tooltip 上，不阻塞设置页）。 */
+      const [modelsError, setModelsError] = useState('');
       const loadModels = typeof props?.loadModels === 'function' ? props.loadModels : null;
       useEffect(() => {
         if (!loadModels) return undefined;
@@ -1479,10 +1511,12 @@
             if (cancelled || !alive.current) return;
             setDiscoveredModels(Array.isArray(list) ? list.map(normalizeSwarmModelEntry) : []);
             setModelsStatus('');
+            setModelsError('');
           })
-          .catch(() => {
+          .catch((error) => {
             if (cancelled || !alive.current) return;
             setModelsStatus('modelsUnavailable');
+            setModelsError(describeModelsError(error));
           });
         return () => {
           cancelled = true;
@@ -1689,9 +1723,13 @@
           if (!alive.current) return undefined;
           setDiscoveredModels(Array.isArray(list) ? list.map(normalizeSwarmModelEntry) : []);
           setModelsStatus('');
+          setModelsError('');
           return true;
-        } catch {
-          if (alive.current) setModelsStatus('modelsUnavailable');
+        } catch (error) {
+          if (alive.current) {
+            setModelsStatus('modelsUnavailable');
+            setModelsError(describeModelsError(error));
+          }
           return false;
         }
       };
@@ -1754,6 +1792,18 @@
       const manualDraft = Object.prototype.hasOwnProperty.call(drafts, 'manualModelRule')
         ? drafts.manualModelRule
         : '';
+      /**
+       * 模型目录状态行：文字只保留本地化摘要，失败原因放进 `title`（tooltip），
+       * 让用户能一眼看出是「宿主流未挂载」还是「协议校验失败」。
+       */
+      const modelsStatusText = modelsStatus
+        ? t(modelsStatus)
+        : (discoveredModels ? '' : t('modelsLoading'));
+      const modelsStatusProps = {
+        className: 'dsh-swarm-settings-status' + (modelsError ? ' is-error' : ''),
+        'data-role': 'models-status',
+        ...(modelsError ? { title: modelsError, 'data-models-error': modelsError } : {}),
+      };
 
       return h('section', { className: 'dsh-swarm-settings', 'data-settings-id': SWARM_SETTINGS_ID, 'aria-label': t('title') },
         h('h2', null, t('title')),
@@ -1798,8 +1848,7 @@
           h('p', { className: 'dsh-swarm-settings-hint', 'data-role': 'whitelist-hint' },
             whitelistMode ? t('whitelistHintOn') : t('whitelistHintOff')),
           h('div', { className: 'dsh-swarm-settings-row' },
-            h('p', { className: 'dsh-swarm-settings-status', 'data-role': 'models-status' },
-              modelsStatus ? t(modelsStatus) : (discoveredModels ? '' : t('modelsLoading'))),
+            h('p', modelsStatusProps, modelsStatusText),
             h('button', {
               type: 'button',
               className: 'dsh-swarm-settings-chip',
@@ -2165,7 +2214,8 @@
         if (!api || typeof api.getSwarmSnapshot !== 'function') {
           throw new Error('Host 端 dsh-swarm.getSwarmSnapshot 服务未就绪');
         }
-        const response = await api.getSwarmSnapshot({ sessionId });
+        // 宿主 api-gateway 会包 `{ ok: true, value }` 信封，先解包再做归一化。
+        const response = unwrapRemoteResult(await api.getSwarmSnapshot({ sessionId }));
         if (isPlainObject(response) && response.ok === false) {
           throw new Error(formatErrorMessage(response.error || response));
         }
@@ -3407,7 +3457,8 @@
           if (!api || typeof api.getSwarmModels !== 'function') {
             throw new Error('Host 端 dsh-swarm.getSwarmModels 服务未就绪');
           }
-          const response = await api.getSwarmModels({ probeAgy: false });
+          // 同 fetchSnapshotOnce：真实宿主的响应带 `{ ok: true, value }` 信封。
+          const response = unwrapRemoteResult(await api.getSwarmModels({ probeAgy: false }));
           if (isPlainObject(response) && response.ok === false) {
             throw new Error(formatErrorMessage(response.error || response));
           }
@@ -3545,6 +3596,8 @@
     parseSwarmResourceUri: parseSwarmAddress,
     parseSwarmRequest,
     normalizeSwarmSnapshot,
+    unwrapRemoteResult,
+    describeModelsError,
     tokenizeSwarmText,
     isLongSwarmMessage,
     getCollapsedPreviewText,
