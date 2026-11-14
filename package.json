@@ -1,0 +1,124 @@
+{
+  "name": "dsh-agy-swarm",
+  "displayName": "Swarm Collaboration Cluster",
+  "version": "0.1.0",
+  "description": "Multi-agent collaboration cluster for DeepSeek Harness: shared #seq message board, doorbell-based wakeups, zero-token sleeping, hot model switching, live feed/topology panel, and an optional Antigravity ACP teammate backend.",
+  "license": "MIT",
+  "author": "higekibaka",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/higekibaka/dsh-agy-swarm.git"
+  },
+  "homepage": "https://github.com/higekibaka/dsh-agy-swarm#readme",
+  "bugs": {
+    "url": "https://github.com/higekibaka/dsh-agy-swarm/issues"
+  },
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "dsh-bundle",
+    "deepseek-harness",
+    "swarm",
+    "multi-agent",
+    "multi-agent-collaboration",
+    "agent-orchestration",
+    "message-board",
+    "acp"
+  ],
+  "type": "commonjs",
+  "main": "index.js",
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./runtime": "./runtime.js",
+    "./protocol": "./src/protocol.js",
+    "./board-store": "./src/board-store.js",
+    "./prompts": "./src/prompts.js",
+    "./redaction": "./src/redaction.js",
+    "./mcp-bridge-server": "./src/mcp-bridge-server.js",
+    "./mcp-stdio-entry": "./src/mcp-stdio-entry.js",
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json",
+    "./icon": "./icon.svg",
+    "./locale/*.json": "./locale/*.json"
+  },
+  "files": [
+    "index.js",
+    "client.js",
+    "runtime.js",
+    "src",
+    "cordis.patch.yml",
+    "icon.svg",
+    "locale",
+    "docs",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": "^22.19.0 || >=24.0.0",
+    "dsh": ">=0.2.2-rc.1"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": ">=4.0.4 <5",
+    "@deepseek-ai/schemastery": ">=3.18.0 <4",
+    "@deepseek-ai/dsh-tools": ">=0.2.0-rc.1 <0.3.0",
+    "@deepseek-ai/dsh-typert-protocol": ">=0.2.0-rc.1 <0.3.0",
+    "@deepseek-ai/dsh-llm": ">=0.2.0-rc.1 <0.3.0",
+    "@deepseek-ai/dsh-scope": ">=0.2.0-rc.1 <0.3.0",
+    "@deepseek-ai/dsh-session": ">=0.2.0-rc.1 <0.3.0",
+    "react": ">=18.0.0",
+    "dsh-agy-acp": ">=0.1.1"
+  },
+  "peerDependenciesMeta": {
+    "@deepseek-ai/cordis": {
+      "optional": true
+    },
+    "@deepseek-ai/schemastery": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-tools": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-typert-protocol": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-llm": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-scope": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-session": {
+      "optional": true
+    },
+    "react": {
+      "optional": true
+    },
+    "dsh-agy-acp": {
+      "optional": true
+    }
+  },
+  "dsh": {
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-resources",
+        "@deepseek-ai/dsh-client-ui-sidebar-right",
+        "@deepseek-ai/dsh-client-ui-conversation",
+        "@deepseek-ai/dsh-client-ui-chat",
+        "@deepseek-ai/dsh-client-ui-settings",
+        "@deepseek-ai/dsh-client-locale"
+      ],
+      "immediately": true
+    },
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "icon": "./icon.svg",
+  "scripts": {
+    "test": "node --test --test-isolation=none test/swarm.test.mjs test/swarm-agy-acp.test.mjs test/swarm-open-source.test.mjs",
+    "test:acp-integration": "node --test --test-isolation=none test/agy-acp-integration.test.mjs",
+    "check": "node --check index.js && node --check client.js && node --check runtime.js && node --check src/protocol.js && node --check src/board-store.js && node --check src/prompts.js && node --check src/redaction.js && node --check src/mcp-bridge-server.js && node --check src/mcp-stdio-entry.js"
+  }
+}

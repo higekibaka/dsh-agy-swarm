@@ -1,0 +1,43 @@
+name: Publish package
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Run npm publish --dry-run instead of publishing'
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Syntax check, tests and package preview
+        run: |
+          npm run check
+          npm test
+          npm pack --dry-run
+
+      - name: Publish to npm
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          if [ "${{ inputs.dry_run }}" = "true" ]; then
+            npm publish --dry-run --access public
+          else
+            npm publish --provenance --access public
+          fi
