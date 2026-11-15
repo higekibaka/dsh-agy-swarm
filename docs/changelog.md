@@ -1,5 +1,20 @@
 # 变更日志
 
+## [0.2.0] - 2026-11-15
+
+### 重构 · 收敛为纯原生 DSH 多智能体集群
+
+- **彻底移除外部 Antigravity ACP 队友后端**：删除 `src/mcp-bridge-server.js`（Loopback HTTP 桥）、`src/mcp-stdio-entry.js`（Stdio MCP 子进程入口），以及该后端对应的两份集成测试与内置替身；`dsh-agy-acp` 的 peer 依赖、相关 `exports`、`keywords` 与 npm 脚本一并移除。`swarm` 工具不再有 `agy_mode` 参数。
+- **成员生命周期全面原生化**：创建 / 冷态唤醒 / 热切模型 / 隔离工作树 / 销毁全部只走宿主原生契约（`ctx.agents.create`、`ctx.agents.resume`、`agent.model.select`、`ctx.worktrees.create`、`agent.cancel`）。成员快照与共享协议不再包含外部队友专属字段（后端标记、外部会话 ID 与 worker 名、运行模式、访问模式、实时阶段、用量账单、激活代次与熔断计数）。
+- **配置与设置页收敛**：Config 只保留模型派发权限三项（`strictAllowlist`、`allowedModels`、`blockedModels`）；设置页删除外部桥运行时、同伴唤醒 / 成员轮次 / 单轮发帖上限与 Node 可执行文件配置，只留「集群说明 + 模型派发权限控制 + 恢复默认」。`getSwarmModels` 请求收敛为严格空对象（原探测开关随该后端能力一并移除），依旧零子进程。
+- **提示词去分支**：删除外部队友技能段落与逐轮提示词信封；协调员规范与 Worker 简报不再提任何外部后端，自治内循环直接说明「在留言板闭环返工直到 100% 实测全绿再唤醒 `@coordinator`」。
+- **向后兼容**：`board-store` 反序列化 0.1.x 落盘数据时按前缀丢弃已移除的后端字段，旧会话历史照常读取，不抛错、也不会把脏字段写回磁盘；被归一化的旧成员按普通原生成员继续可用。
+- **未配置 provider 一律拒绝**：宿主模型目录非空时，`model: "some-provider/x"` 中目录里不存在的 provider 会按「宿主未配置 provider」当场报错，而不是把一个宿主不认识的 provider 静默塞给子代理；显式禁用优先，先命中黑名单文案。
+
+### 兼容性
+
+- 包名与插件身份完全不变：`dsh-agy-swarm`、设置页 `dsh-agy-swarm`、locale 命名空间 `settings.dshAgySwarm`、旧表单只读兜底 `local-dsh-swarm`、Typert 服务 `dsh-swarm`（`getSwarmSnapshot` / `watchSwarm` / `getSwarmModels`）与 `dsh-resource://swarm/...` 资源协议全部保留，已有用户配置与设置页 ID 无需迁移。
+- 四个模型工具（`swarm` / `post_message` / `read_board` / `swarm_wait`）、`/swarm` 命令与 `swarm` / `swarm-monitor` 技能、门铃唤醒与零 Token 休眠语义均零回归。
 ## [0.1.2] - 2026-11-15
 
 ### 改进 · 外部 `agy` 空轮次权限拒绝诊断（`deniedActions`）

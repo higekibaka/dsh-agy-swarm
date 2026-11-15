@@ -29,15 +29,15 @@
 | 右侧栏面板 | `dsh-resource://swarm/<sessionId>` 实时渲染 **留言流 / 成员花名册 / @mention 拓扑图**，长留言折叠，顶栏快捷入口与聊天内深链胶囊 |
 | 隔离工作区 | `workspace: "inherit" \| "share"`，`share` 直接委托宿主 `ctx.worktrees.create`，由宿主在会话归档时回收 |
 | 无损热切模型 | `swarm{action:"model"}` 在保留完整对话历史的前提下切换已配置且被允许派发的路由 |
-| 防死循环阈值 | `maxConsecutivePeerWakes` / `maxAgyTurnsPerMember` 默认 **`0` = 无限不熔断**；显式设正整数才按阈值拦截并置 `stopped` |
+| 纯原生多智能体 | 成员全部是宿主原生 DSH 子代理（`ctx.agents.create` / `resume`），没有外部进程或旁路消息通道：冷态唤醒、热切模型、`fork` 与 `share` 工作树都走宿主原生契约 |
 | 可视化模型派发权限 | 设置页勾选白名单 / 黑名单（`allowedModels` / `blockedModels`），Host 在工具入口硬拦截：被禁模型与「继承来的默认路由」都会被拒绝并给出明确错误，绝不静默降级；**开源默认两个列表都为空 = 完全放行** |
-| 可选 ACP 后端 | 装 `dsh-agy-acp` 后可用 `model: "agy/<model>"` 把成员交给本机 Antigravity CLI；**未安装时自动隐藏 `agy` 技能说明与模型条目（设置页标注为可选扩展）** |
+
 
 ## 架构
 
 ```
                        ┌────────────────────────────────────────────┐
-   用户 /swarm ───────▶ │  Coordinator 会话                          │
+   用户 /swarm ───────▶ │  Coordinator 会话（主控）                   │
                        │  swarm / post_message / read_board /        │
                        │  swarm_wait 四工具按需暴露                  │
                        └───────────────┬────────────────────────────┘
@@ -45,31 +45,28 @@
                  ┌─────────────────────┼─────────────────────┐
                  ▼                     ▼                     ▼
           ┌────────────┐        ┌────────────┐        ┌────────────┐
-          │ Worker A   │        │ Worker B   │        │ agy 队友   │ (可选 dsh-agy-acp)
-          │ DSH 子会话 │        │ DSH 子会话 │        │ ACP 进程   │
+          │ Worker A   │        │ Worker B   │        │ monitor    │
+          │ DSH 子会话 │        │ DSH 子会话 │        │ 巡检守护   │
           └─────┬──────┘        └─────┬──────┘        └─────┬──────┘
-                │  post_message       │                     │ MCP Stdio
+                │  post_message       │                     │
                 ▼                     ▼                     ▼
         ╔═══════════════════════════════════════════════════════════╗
         ║  BoardStore：board.jsonl（#seq 单调）+ state.json（原子）  ║
         ╚═══════════════════════════════════════════════════════════╝
-                ▲                                            ▲
-                │ 快照 / 事件流                                │ Loopback HTTP 桥
-        ┌───────┴────────┐                    ┌──────────────┴─────────────┐
-        │ 右侧栏面板      │                    │ 127.0.0.1 随机端口         │
-        │ Feed/Members/  │                    │ 一次性 Bearer Token        │
-        │ Graph          │                    │ 五重校验 + 身份服务端绑定   │
-        └────────────────┘                    └────────────────────────────┘
+                ▲
+                │ 快照 / 事件流（Typert dsh-swarm 服务）
+        ┌───────┴────────┐
+        │ 右侧栏面板      │
+        │ Feed/Members/  │
+        │ Graph          │
+        └────────────────┘
 ```
 
 ## 快速开始
 
 ```bash
-# 1. 安装（宿主 @deepseek-ai/* 依赖由 DSH 提供，均为 optional peer）
+# 安装（宿主 @deepseek-ai/* 依赖由 DSH 提供，均为 optional peer）
 npm install dsh-agy-swarm
-
-# 2. 可选：需要跨模型家族的 ACP 队友时再装
-npm install dsh-agy-acp
 ```
 
 在 DSH 会话里输入：
@@ -92,44 +89,38 @@ npm install dsh-agy-acp
 - **空名单 = 全禁**：严格模式取消最后一个勾选（或移除最后一个白名单胶囊、或目录为空就开启）时，开关仍是开的、名单为空，此时**所有模型一律拒绝**——绝不会反转成放行；保存失败时开关回滚到已保存状态并提示错误；
 - 手动输入支持直接加入禁用或允许列表；「恢复默认」同时清空两个数组。
 
-拦截发生在所有入口：显式 `model`、**省略 `model` 继承协调员当前路由**、以及 `swarm{action:"model"}` 热切。匹配大小写不敏感，`provider/model` 与裸 `model` 名都参与判定，`agy/<alias>` 会先归一化成 `agy/<规范名>` 再判定。详见 [配置](./docs/configuration.md#模型派发权限allowedmodels--blockedmodels)。
+拦截发生在所有入口：显式 `model`、**省略 `model` 继承协调员当前路由**、以及 `swarm{action:"model"}` 热切。匹配大小写不敏感，`provider/model` 与裸 `model` 名都参与判定。宿主模型目录里不存在的 provider 会按「未配置 provider」当场拒绝，绝不会把一个不存在的后端静默塞给子代理。详见 [配置](./docs/configuration.md#模型派发权限allowedmodels--blockedmodels)。
 
-## 可选扩展 `dsh-agy-acp`
+## 纯原生架构，没有外部后端
 
-本插件对未安装该扩展的用户**完全可用**：
+从 `0.2.0` 起本插件只做一件事：把 DSH 宿主**原生**的多智能体能力组织成一块公共留言板。
 
-- 协调员技能与成员简报里**不注入**任何 `agy/<model>` 派发说明（工具参数 schema 同样保持通用）；
-- `swarm{action:"models"}` 不会拼入 `agy/…` 条目；
-- 显式传 `model: "agy/..."` 会得到一条明确的「请先安装 `dsh-agy-acp`」错误，而不是静默降级。
-
-设置页里与 ACP 相关的三项（`maxAgyTurnsPerMember` / `maxAgyPostsPerTurn` / `nodeExecutable`）始终保留，但都会标注为「可选 ACP 扩展项」。装上之后才会动态拼接外部 ACP 队友段落，并启用 `agy_mode`（`plan` / `accept-edits`）、MCP 留言板桥与 `agyLive` / `agyUsage` 面板指标。
-
-模型派发权限会与 `dsh-agy-acp` 自己的禁用 / 仅 Plan 规则**叠加生效**：两侧都放行才能真正派发。
+- 成员一律是原生 DSH 子代理：`ctx.agents.create` 拉起、`ctx.agents.resume` 冷态唤醒、`agent.model.select` 热切模型、`ctx.worktrees.create` 提供隔离工作树；
+- 没有第二个后端、没有旁路消息通道：唤醒统一走 `agent.followup` / `agent.inject`，休眠统一走 `exec.concludeTurn()`；
+- 工具参数与提示词里不存在任何「外部 CLI / 外部队友 / 可选扩展」分支，`swarm` 的行为与设置页在该插件的任何安装形态下都完全一致；
+- 历史遗留：0.1.x 曾支持过一个外部队友后端与本地 MCP 桥，两者已在 0.2.0 全部移除，旧会话落盘里的相关字段在反序列化时会被静默丢弃（详见 [变更日志](./docs/changelog.md)）。
 
 ## 诚实边界
 
 | 项目 | 事实 |
 | --- | --- |
-| 测试依赖 | 离线单测**不启动真实模型推理、不访问网络**，**纯 Node 即可运行**（宿主 `@deepseek-ai/*` 存在时自动复用，缺失时 `runtime.js` 回退到内置 Standard Schema）。不是「零磁盘依赖」：会创建临时文件，集成套件还会读写临时 SQLite 账单库 |
-| 真实 ACP 联合 | 需要真实 `dsh-agy-acp` 包，属于**可选集成套件**（`npm run test:acp-integration`，通过 `DSH_AGY_ACP_ROOT` 或包名解析）。它跑真实 `AgyWorkerService` + `MockAcpServer`：桥工具闭环、运行中 `stopAcpRun` 取消 + Token 吊销、`node:sqlite` 账单累计；未安装时带原因 skip。默认主套件用内置契约级替身覆盖 swarm 侧逻辑 |
+| 测试依赖 | 离线单测**不启动真实模型推理、不访问网络**，**纯 Node 即可运行**（宿主 `@deepseek-ai/*` 存在时自动复用，缺失时 `runtime.js` 回退到内置 Standard Schema）。不是「零磁盘依赖」：会创建临时文件 |
 | 频道隔离 | `#channel` 只是注意力路由，**不是权限或保密边界**：任何成员都可能被 `@#频道` 拉进讨论 |
-| 熔断默认值 | 默认 `0` = 无限轮次。这是刻意选择；需要硬上限时必须自己显式配置正整数 |
-| 模型派发权限默认值 | 两个列表默认空 = 完全放行。开源版**不预置任何模型白名单或禁令**；限制完全是你自己在设置页勾出来的，且对原生与 `agy/…` 两侧同时生效 |
+| 内循环轮次 | 自治内循环**不设轮次上限**：返工在留言板内闭环，直到实测全绿才唤醒协调员。这是刻意选择，代价是可能长时间占用会话 |
+| 模型派发权限默认值 | 两个列表默认空 = 完全放行。开源版**不预置任何模型白名单或禁令**；限制完全是你自己在设置页勾出来的 |
 | 设置页兼容 | 升级前安装在旧 patch entry（`local-dsh-swarm`）下的用户：设置页按宿主 `whileServed` 实际服务的命名空间选择表单，新旧任一存在即可正常读写；两者都不存在则不显示设置页 |
-| 平台 | 只依赖 Node 标准库与 DSH 宿主服务；Windows / macOS / Linux 同一套代码，Node 可执行探测按 `process.resourcesPath` 与 `execPath` 现算，无任何盘符硬编码 |
+| 平台 | 只依赖 Node 标准库与 DSH 宿主服务；Windows / macOS / Linux 同一套代码，无任何盘符硬编码 |
 
 ## 目录结构
 
 ```
-index.js                  Host Cordis 插件：Config、四工具、Typert 服务、agy 调度
-client.js                 Desktop 右侧栏面板 / 顶栏按钮 / 工具卡片渲染
+index.js                  Host Cordis 插件：Config、四工具、Typert 服务、成员生命周期
+client.js                 Desktop 右侧栏面板 / 顶栏按钮 / 工具卡片渲染 / 设置页
 runtime.js                宿主 @deepseek-ai/schemastery 惰性加载（缺省回退零依赖 Schema）
 src/protocol.js           前后端共享快照协议与 Typert 描述符
 src/board-store.js        留言板存储引擎、门铃路由、权限状态机
-src/prompts.js            协调员技能 / Worker 简报 / agy 信封（可选段落动态拼接）
+src/prompts.js            协调员技能 / Worker 简报 / 巡检技能正文
 src/redaction.js          凭据、Token、个人主目录路径脱敏
-src/mcp-bridge-server.js  Loopback HTTP 桥（一次性 Token + 五重校验）
-src/mcp-stdio-entry.js    零依赖 Stdio MCP Server（agy 侧子进程入口）
 docs/                     配置、参考、开发与变更日志
 ```
 
@@ -137,9 +128,8 @@ docs/                     配置、参考、开发与变更日志
 
 ```bash
 npm run check                                   # 全量 node --check
-npm test                                        # 离线主套件（含内置 ACP 替身；Windows 沙盒用）
+npm test                                        # 两个离线套件（Windows 沙盒用 --test-isolation=none）
 npm run test:ci                                 # 同一套件的 CI 版，不带 --test-isolation
-npm run test:acp-integration                    # 可选：真实 dsh-agy-acp 端到端
 npm pack --dry-run --json                       # 打包清单预演
 ```
 

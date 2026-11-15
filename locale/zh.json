@@ -1,6 +1,6 @@
 {
   "meta": {
     "title": "Swarm 协作集群",
-    "description": "复刻 Antigravity /swarm：共享 #seq 公共留言板、@name/@#channel 门铃唤醒、零消耗结轮休眠、热分叉与无损切模型、右侧栏实时留言流与拓扑图面板。"
+    "description": "原生 DSH 多智能体协作集群：共享 #seq 公共留言板、@name/@#channel 门铃唤醒、零消耗结轮休眠、热分叉与无损切模型、右侧栏实时留言流与拓扑图面板。"
   }
 }

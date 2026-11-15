@@ -3,7 +3,7 @@
 /**
  * dsh-agy-swarm — Host Cordis Plugin for DeepSeek Harness
  *
- * Implements Antigravity-style `/swarm` multi-agent orchestration:
+ * Implements a native `/swarm` multi-agent collaboration cluster:
  * - Four model tools: `swarm`, `post_message`, `read_board`, `swarm_wait`
  * - `/swarm` slash command (`ctx.commands`) + `swarm` / `swarm-monitor` skills (`ctx.skills`)
  * - Guardrail 1: Workers created with `meta: { origin: "subagent", parentSession: coordinatorId }`
@@ -20,7 +20,6 @@
 
 const path = require('node:path');
 const crypto = require('node:crypto');
-const fs = require('node:fs');
 
 const {
   PLUGIN_ID,
@@ -33,15 +32,11 @@ const {
   parseSwarmRequest,
   parseSwarmModelsRequest,
   parseSwarmModelsResult,
-  normalizeAgyLive,
-  normalizeAgyUsage,
-  normalizeAgyTurnTokens,
 } = require('./src/protocol.js');
 
 const {
   expandAddSpecs,
   isMonitorRoleOrName,
-  parseMessageDoorbells,
   SwarmStoreManager,
 } = require('./src/board-store.js');
 
@@ -49,14 +44,11 @@ const {
   COORDINATOR_SKILL_CONTENT,
   MONITOR_SKILL_CONTENT,
   buildWorkerSystemPrompt,
-  buildAgyWorkerPromptEnvelope,
   buildCoordinatorSkillInjection,
 } = require('./src/prompts.js');
 
 const runtime = require('./runtime.js');
 const { redactSensitiveText } = require('./src/redaction.js');
-const { SwarmMcpBridgeServer, MAX_POSTS_PER_TURN } = require('./src/mcp-bridge-server.js');
-
 /** Maximum Swarm delegation depth (host root = 0, first child = 1). */
 const MAX_SWARM_DELEGATION_DEPTH = 4;
 /** Hard bounds for scheduled monitor delays (setTimeout/setInterval range). */
@@ -97,52 +89,11 @@ function normalizeWorkspaceMode(raw) {
 }
 
 /* ------------------------------------------------------------------ */
-/* 二期：agy-acp 外部队友接入（契约 1 / 2 / 3）                          */
-/* ------------------------------------------------------------------ */
-
-/** Swarm 专属 MCP 桥服务名（agy 侧工具名形如 dsh_swarm_bridge_post_message）。 */
-const SWARM_MCP_SERVER_NAME = 'dsh_swarm_bridge';
-const AGY_BACKEND = 'agy-acp';
-const AGY_MODES = Object.freeze(['accept-edits', 'plan', 'default']);
-const AGY_WORKER_NAME_RE = /^[a-z][a-z0-9-]{0,31}$/;
-const MCP_STDIO_ENTRY = path.join(__dirname, 'src', 'mcp-stdio-entry.js');
-/**
- * 契约 0.2（用户最新拍板）：自治内循环默认**无限**。
- * `0` = 不熔断；正整数 `> 0` = 按该阈值熔断（既有显式阈值单测 100% 兼容）。
- */
-const DEFAULT_MAX_CONSECUTIVE_PEER_WAKES = 0;
-const DEFAULT_MAX_AGY_TURNS_PER_MEMBER = 0;
-const AGY_ACTIVITY_THROTTLE_MS = 1500;
-const AGY_AUTO_ARCHIVE_TAG = '[自动归档 · 未显式调用 post_message]';
-const AGY_CIRCUIT_BREAK_MESSAGE =
-  '触发防死循环熔断：连续同伴唤醒或总激活轮次超限，已暂停等待 coordinator 裁决';
-const AGY_EMPTY_TURN_MESSAGE = 'agy 本轮未调用 post_message 且未输出任何文本';
-/**
- * 宿主自带 Node 运行时相对安装根的路径（Electron 桌面版与 CLI 共用布局）。
- * 这里只保留相对片段：绝对路径一律由 process.resourcesPath / execPath 现算，跨平台零硬编码。
- */
-const NODE_RUNTIME_RELATIVE_DIRS = Object.freeze([
-  'resources',
-  'runtime',
-  'primary-runtime',
-  'dependencies',
-  'node',
-  'bin',
-]);
-
-/* ------------------------------------------------------------------ */
 /* Config（Standard Schema + .volatile() 热更新）                        */
 /* ------------------------------------------------------------------ */
 
-/**
- * 运行时配置默认值：`maxConsecutivePeerWakes` / `maxAgyTurnsPerMember` 的
- * `0` 代表「无限、不触发防死循环熔断」，正整数才按阈值熔断。
- */
+/** 运行时配置默认值：只剩「模型派发权限」三项，其余字段已随外部后端一并移除。 */
 const SWARM_CONFIG_DEFAULTS = Object.freeze({
-  nodeExecutable: '',
-  maxConsecutivePeerWakes: DEFAULT_MAX_CONSECUTIVE_PEER_WAKES,
-  maxAgyTurnsPerMember: DEFAULT_MAX_AGY_TURNS_PER_MEMBER,
-  maxAgyPostsPerTurn: MAX_POSTS_PER_TURN,
   /**
    * 模型派发权限：开源默认完全放行。
    * - `strictAllowlist`：严格白名单开关。`true` 时白名单恒为激活态，
@@ -160,10 +111,6 @@ const SWARM_CONFIG_DEFAULTS = Object.freeze({
 /** 手写 Standard Schema：宿主 schemastery 不可用时的零依赖兜底。 */
 function makeFallbackConfigSchema() {
   const fields = [
-    { key: 'nodeExecutable', kind: 'string', fallback: SWARM_CONFIG_DEFAULTS.nodeExecutable },
-    { key: 'maxConsecutivePeerWakes', kind: 'count', fallback: SWARM_CONFIG_DEFAULTS.maxConsecutivePeerWakes },
-    { key: 'maxAgyTurnsPerMember', kind: 'count', fallback: SWARM_CONFIG_DEFAULTS.maxAgyTurnsPerMember },
-    { key: 'maxAgyPostsPerTurn', kind: 'count', fallback: SWARM_CONFIG_DEFAULTS.maxAgyPostsPerTurn, min: 1 },
     { key: 'strictAllowlist', kind: 'boolean', fallback: SWARM_CONFIG_DEFAULTS.strictAllowlist },
     { key: 'allowedModels', kind: 'modelRules', fallback: SWARM_CONFIG_DEFAULTS.allowedModels },
     { key: 'blockedModels', kind: 'modelRules', fallback: SWARM_CONFIG_DEFAULTS.blockedModels },
@@ -180,14 +127,6 @@ function makeFallbackConfigSchema() {
           const raw = input[field.key];
           if (raw === undefined) {
             out[field.key] = field.fallback;
-            continue;
-          }
-          if (field.kind === 'string') {
-            if (typeof raw !== 'string') {
-              issues.push({ message: `${field.key} 必须是字符串`, path: [field.key] });
-              continue;
-            }
-            out[field.key] = raw;
             continue;
           }
           if (field.kind === 'boolean') {
@@ -214,11 +153,6 @@ function makeFallbackConfigSchema() {
             out[field.key] = normalizeModelRuleList(raw);
             continue;
           }
-          if (!Number.isSafeInteger(raw) || raw < (field.min ?? 0)) {
-            issues.push({ message: `${field.key} 必须是不小于 ${field.min ?? 0} 的安全整数`, path: [field.key] });
-            continue;
-          }
-          out[field.key] = raw;
         }
         return issues.length > 0 ? { issues } : { value: out };
       },
@@ -252,28 +186,6 @@ function buildConfigSchema() {
       const allowedModelsField = modelRuleField([...SWARM_CONFIG_DEFAULTS.allowedModels]);
       const blockedModelsField = modelRuleField([...SWARM_CONFIG_DEFAULTS.blockedModels]);
       return z.object({
-        nodeExecutable: z.string().default(SWARM_CONFIG_DEFAULTS.nodeExecutable).volatile(),
-        maxConsecutivePeerWakes: z
-          .number()
-          .step(1)
-          .min(0)
-          .max(100000)
-          .default(SWARM_CONFIG_DEFAULTS.maxConsecutivePeerWakes)
-          .volatile(),
-        maxAgyTurnsPerMember: z
-          .number()
-          .step(1)
-          .min(0)
-          .max(100000)
-          .default(SWARM_CONFIG_DEFAULTS.maxAgyTurnsPerMember)
-          .volatile(),
-        maxAgyPostsPerTurn: z
-          .number()
-          .step(1)
-          .min(1)
-          .max(64)
-          .default(SWARM_CONFIG_DEFAULTS.maxAgyPostsPerTurn)
-          .volatile(),
         // 模型派发权限：开源默认完全放行（strictAllowlist=false 且两个列表为空）。
         strictAllowlist: z.boolean().default(SWARM_CONFIG_DEFAULTS.strictAllowlist).volatile(),
         ...(allowedModelsField ? { allowedModels: allowedModelsField } : {}),
@@ -293,7 +205,7 @@ const Config = buildConfigSchema();
  *
  * schemastery 的 `.volatile()` 字段在 Standard Schema 校验后会变成
  * `{ get(), [write] }` 访问器（热更新时值会变）；若不解包，任何设置都会被
- * 当成「缺省」而回落到默认 0/0/8。这里同时兼容裸值、访问器与 `{ value }` 包装。
+ * 当成「缺省」而回落到默认值。这里同时兼容裸值、访问器与 `{ value }` 包装。
  */
 function readConfigValue(raw) {
   let current = raw;
@@ -319,25 +231,7 @@ function readConfigValue(raw) {
 /** 只取 Swarm 运行期真正消费的字段（避免把无关键灌进 controller）。 */
 function normalizeSwarmConfig(raw) {
   const input = raw && typeof raw === 'object' ? raw : {};
-  const count = (value, fallback, min = 0) => {
-    const resolved = readConfigValue(value);
-    return Number.isSafeInteger(resolved) && resolved >= min ? resolved : fallback;
-  };
-  const text = (value, fallback) => {
-    const resolved = readConfigValue(value);
-    return typeof resolved === 'string' ? resolved : fallback;
-  };
   return {
-    nodeExecutable: text(input.nodeExecutable, SWARM_CONFIG_DEFAULTS.nodeExecutable),
-    maxConsecutivePeerWakes: count(
-      input.maxConsecutivePeerWakes,
-      SWARM_CONFIG_DEFAULTS.maxConsecutivePeerWakes
-    ),
-    maxAgyTurnsPerMember: count(
-      input.maxAgyTurnsPerMember,
-      SWARM_CONFIG_DEFAULTS.maxAgyTurnsPerMember
-    ),
-    maxAgyPostsPerTurn: count(input.maxAgyPostsPerTurn, SWARM_CONFIG_DEFAULTS.maxAgyPostsPerTurn, 1),
     strictAllowlist: readConfigValue(input.strictAllowlist) === true,
     allowedModels: normalizeModelRuleList(input.allowedModels),
     blockedModels: normalizeModelRuleList(input.blockedModels),
@@ -372,9 +266,8 @@ function normalizeModelRuleList(list) {
 /**
  * 候选模型的规则键集合（全部小写）。
  *
- * 同时纳入完整 `provider/model` 键、裸 `model` 名与调用方原始 spec：
- * `agy/<alias>` 这类写法在解析前先由 `_resolveAgyModel` 归一化，因此
- * 别名规则既能命中 `agy/<canonical>`，也能命中原始 spec。
+ * 同时纳入完整 `provider/model` 键、裸 `model` 名与调用方原始 spec，
+ * 因此白名单 / 黑名单规则既能按路由写法命中，也能按裸模型名命中。
  */
 function modelRuleKeys(candidate) {
   const keys = new Set();
@@ -478,386 +371,6 @@ function assertSwarmModelAllowed(config, candidate, options = {}) {
     );
   }
   throw new Error(`Swarm 拒绝派发模型 ${label}：${reason}。${remedy}`);
-}
-
-/**
- * agy 轮次阶段 → 面板文案。
- * 同时覆盖 dsh-agy-acp 的 onProgress phase（spawn/initialize/...）
- * 与 ACP 监控面板的 run phase（queued/spawning/cancelling/...）。
- */
-const AGY_PHASE_LABELS = Object.freeze({
-  queued: '排队等待 agy 执行槽位',
-  spawn: 'agy 进程启动中',
-  spawning: 'agy 进程启动中',
-  initialize: 'agy ACP 握手',
-  initializing: 'agy ACP 握手',
-  new: '创建 agy 会话',
-  creating_session: '创建 agy 会话',
-  load: '加载 agy 会话',
-  loading_session: '加载 agy 会话',
-  configure: '应用模型与模式',
-  configuring: '应用模型与模式',
-  prompt: 'agy 生成中',
-  prompting: 'agy 生成中',
-  cancelling: '正在取消本轮',
-  stopping: '正在停止本轮',
-});
-
-/** 从 onProgress 的 live 载荷中提取 pid（1..MAX_SAFE_INTEGER，缺失记 0）。 */
-function pickAgyPid(progress) {
-  for (const value of [progress?.pid, progress?.processPid, progress?.workerPid]) {
-    if (Number.isSafeInteger(value) && value > 0) return value;
-  }
-  return 0;
-}
-
-/**
- * 归一化 agy-acp 的 `onProgress(live)` 载荷为契约 3.2 的
- * `agyLive: { runId, phase, pid, activity }`；无法识别时返回 null。
- */
-function describeAgyProgress(progress) {
-  if (!progress || typeof progress !== 'object') return null;
-  const phase = typeof progress.phase === 'string' ? progress.phase.slice(0, 32) : '';
-  if (!phase) return null;
-  const rawActivity =
-    typeof progress.activity === 'string' && progress.activity
-      ? progress.activity
-      : AGY_PHASE_LABELS[phase] || 'agy ' + phase;
-  // 活动摘要会进快照、事件流与下一次模型上下文：先脱敏再限长。
-  const activity = redactSensitiveText(rawActivity, { maxChars: 240 });
-  return {
-    runId: typeof progress.runId === 'string' ? progress.runId.slice(0, 64) : '',
-    phase,
-    pid: pickAgyPid(progress),
-    activity,
-  };
-}
-
-/**
- * 从一轮 agy 返回值中读取 `turnUsageSummary` → 契约的 `lastTurnTokens`。
- * 旧版 agy-acp（或无账单的 mock）没有该字段时返回 null，完全向后兼容。
- */
-function extractAgyTurnUsage(result) {
-  if (!result || typeof result !== 'object') return null;
-  const summary = result.turnUsageSummary;
-  if (!summary || typeof summary !== 'object' || Array.isArray(summary)) return null;
-  return normalizeAgyTurnTokens({
-    stepCount: summary.stepCount,
-    totalInput: summary.totalInput,
-    cacheRead: summary.cacheRead,
-    totalOutput: summary.totalOutput,
-    thinking: summary.thinking,
-    cacheHitRate: summary.cacheHitRate,
-  });
-}
-
-/**
- * 累计账单：`turns + 1` 并累加各计数字段，命中率始终按累计
- * `cacheRead / totalInput` 重算（不信任上游的陈旧比率）。
- */
-function mergeAgyUsage(previous, lastTurnTokens) {
-  const base = normalizeAgyUsage(previous) || {
-    turns: 0,
-    stepCount: 0,
-    totalInput: 0,
-    cacheRead: 0,
-    totalOutput: 0,
-    thinking: 0,
-    cacheHitRate: 0,
-    lastTurnTokens: null,
-  };
-  return normalizeAgyUsage({
-    turns: base.turns + 1,
-    stepCount: base.stepCount + lastTurnTokens.stepCount,
-    totalInput: base.totalInput + lastTurnTokens.totalInput,
-    cacheRead: base.cacheRead + lastTurnTokens.cacheRead,
-    totalOutput: base.totalOutput + lastTurnTokens.totalOutput,
-    thinking: base.thinking + lastTurnTokens.thinking,
-    lastTurnTokens,
-  });
-}
-
-/** Swarm 传给 agy runDirectTurn 的精确桥白名单（契约 2.3）。 */
-function buildAgyBridgeAllowlist() {
-  return {
-    serverName: SWARM_MCP_SERVER_NAME,
-    readOnlyTools: ['read_board'],
-    coordinationTools: ['post_message'],
-    writeTools: [],
-  };
-}
-
-/** `agy`、`agy/…`、`agy-acp`、`agy-acp/…`（大小写不敏感）路由到外部 ACP 后端。 */
-function isAgyModelSpec(raw) {
-  if (typeof raw !== 'string') return false;
-  const lower = raw.trim().toLowerCase();
-  return (
-    lower === 'agy' ||
-    lower === 'agy-acp' ||
-    lower.startsWith('agy/') ||
-    lower.startsWith('agy-acp/')
-  );
-}
-
-/** 取 `agy/<spec>` 的 `<spec>` 部分；裸写 `agy` / `agy-acp` 返回 ''。 */
-function agySubSpec(raw) {
-  const clean = String(raw ?? '').trim();
-  const slash = clean.indexOf('/');
-  return slash >= 0 ? clean.slice(slash + 1).trim() : '';
-}
-
-/**
- * agy Worker 名：`<slug20>-<sha8>`，满足 agy-acp 的 /^[a-z][a-z0-9-]{0,31}$/。
- * 哈希混入协调员会话与成员会话，保证跨 swarm、跨同名重建都不撞名。
- */
-function makeAgyWorkerName(memberName, coordinatorSessionId, memberSessionId) {
-  let slug = String(memberName ?? '')
-    .toLowerCase()
-    .replace(/[^a-z0-9-]+/g, '-')
-    .replace(/-+/g, '-')
-    .replace(/^-+|-+$/g, '');
-  if (!/^[a-z]/.test(slug)) slug = 'm' + slug;
-  slug = slug.slice(0, 20).replace(/-+$/g, '') || 'm';
-  const digest = crypto
-    .createHash('sha256')
-    .update(`${coordinatorSessionId}\u0000${memberName}\u0000${memberSessionId}`)
-    .digest('hex')
-    .slice(0, 8);
-  const name = `${slug}-${digest}`;
-  if (!AGY_WORKER_NAME_RE.test(name)) {
-    throw new Error(`无法为成员 "${memberName}" 生成合法的 agy Worker 名（${name}）`);
-  }
-  return name;
-}
-
-/**
- * 读取调用方（父会话）的 Plan 状态。读取异常时按「处于 Plan」保守处理（fail-closed）。
- */
-function readCallerPlanMode(ctx, agent) {
-  const svc = (() => {
-    try {
-      return agent?.ctx?.get?.('planMode') ?? ctx?.get?.('planMode') ?? ctx?.planMode ?? null;
-    } catch {
-      return null;
-    }
-  })();
-  if (!svc) return false;
-  try {
-    if (typeof svc.get === 'function') {
-      const state = svc.get(agent);
-      return (
-        state === true ||
-        state?.active === true ||
-        state?.pending === true ||
-        state?.selected === true
-      );
-    }
-    if (typeof svc.selectedActive === 'function' && agent?.session) {
-      return svc.selectedActive(agent.session) === true;
-    }
-    if (typeof svc.loggedActive === 'function' && agent?.session) {
-      return svc.loggedActive(agent.session) === true;
-    }
-  } catch {
-    return true;
-  }
-  return false;
-}
-
-/**
- * 契约 1.3：根据父会话策略推导 agy 运行模式与权限。
- * - 父会话 Plan / 只读：显式 accept-edits 越权报错；否则强制 plan，fullAccess=false；
- * - 可写父会话：默认 accept-edits；fullAccess 仅在 danger-full-access 且非 plan 时为 true。
- */
-function resolveAgyPolicy({ sandboxMode, planMode = false, requestedMode } = {}) {
-  const requested =
-    typeof requestedMode === 'string' && requestedMode.trim() ? requestedMode.trim() : null;
-  if (requested && !AGY_MODES.includes(requested)) {
-    throw new Error(`不支持的 agy_mode "${requested}"：仅支持 ${AGY_MODES.join(' | ')}`);
-  }
-  const effectiveSandbox = typeof sandboxMode === 'string' && sandboxMode ? sandboxMode : 'workspace-write';
-  const restricted = planMode === true || effectiveSandbox === 'read-only';
-  if (restricted) {
-    if (requested === 'accept-edits') {
-      throw new Error(
-        `父会话${planMode ? '处于 Plan 模式' : '是只读沙盒（read-only）'}，禁止以 agy_mode:"accept-edits" 拉起 agy 成员（越权）；请改用 agy_mode:"plan"`
-      );
-    }
-    return {
-      mode: 'plan',
-      fullAccess: false,
-      accessMode: effectiveSandbox === 'read-only' ? 'read-only' : effectiveSandbox,
-      parentSandboxMode: effectiveSandbox,
-    };
-  }
-  const mode = requested ?? 'accept-edits';
-  const fullAccess = effectiveSandbox === 'danger-full-access' && mode !== 'plan';
-  return {
-    mode,
-    fullAccess,
-    accessMode: fullAccess ? 'danger-full-access' : effectiveSandbox === 'danger-full-access' ? 'workspace-write' : effectiveSandbox,
-    parentSandboxMode: effectiveSandbox,
-  };
-}
-
-const SANDBOX_RANK = Object.freeze({ 'read-only': 0, 'workspace-write': 1, 'danger-full-access': 2 });
-
-/**
- * 外部 agy 路径专用：严格读取父会话有效沙盒模式（P1-3）。
- * sandboxPolicy 服务缺失、resolve 抛错或未返回合法 mode 时一律抛错（fail-closed），
- * 绝不静默回退成 workspace-write。原生 DSH 子代理仍走 captureDelegatedPolicyOverrides。
- */
-function readStrictSandboxMode(ctx, agent) {
-  let svc = null;
-  try {
-    svc = agent?.ctx?.get?.('sandboxPolicy') ?? agent?.ctx?.sandboxPolicy ?? null;
-  } catch {
-    svc = null;
-  }
-  if (!svc) {
-    try {
-      svc = ctx?.get?.('sandboxPolicy') ?? ctx?.sandboxPolicy ?? null;
-    } catch {
-      svc = null;
-    }
-  }
-  if (!svc || typeof svc.resolve !== 'function') {
-    throw new Error(
-      '宿主未提供 sandboxPolicy 服务，无法确认父会话文件边界：拒绝启动外部 agy 成员（不静默放宽为 workspace-write）'
-    );
-  }
-  let resolved;
-  try {
-    resolved = svc.resolve({ session: agent?.session });
-  } catch (err) {
-    throw new Error(
-      `解析父会话 sandboxPolicy 失败：${extractErrorMessage(err)}；拒绝启动外部 agy 成员（不静默放宽为 workspace-write）`
-    );
-  }
-  let mode = resolved && typeof resolved.mode === 'string' ? resolved.mode.trim() : '';
-  if (!Object.hasOwn(SANDBOX_RANK, mode)) {
-    throw new Error(
-      `sandboxPolicy.resolve() 未返回已知有效 mode（收到 "${String(resolved?.mode ?? '')}"）：拒绝启动外部 agy 成员（不静默放宽为 workspace-write）`
-    );
-  }
-  if (typeof svc.overrideOf === 'function') {
-    let override;
-    try {
-      override = svc.overrideOf(agent?.session);
-    } catch (err) {
-      throw new Error(
-        `读取父会话 sandboxPolicy.overrideOf() 失败：${extractErrorMessage(err)}；拒绝启动外部 agy 成员（不静默放宽为 workspace-write）`
-      );
-    }
-    if (override !== undefined && override !== null && override !== '') {
-      const cleanOverride = typeof override === 'string' ? override.trim() : '';
-      if (!Object.hasOwn(SANDBOX_RANK, cleanOverride)) {
-        throw new Error(
-          `sandboxPolicy.overrideOf() 返回未知 mode "${String(override)}"：拒绝启动外部 agy 成员（不静默放宽为 workspace-write）`
-        );
-      }
-      mode = cleanOverride;
-    }
-  }
-  return mode;
-}
-
-/**
- * P0-1：把成员持久化权限与父会话「当前」策略取更严格的交集（只收紧、绝不提权）。
- * live 为 null（协调员离线）时安全沿用持久化快照；未知 live.sandboxMode 按最严 read-only 收紧。
- */
-function clampAgyTurnPolicy(persisted, live) {
-  let mode = AGY_MODES.includes(persisted?.agyMode) ? persisted.agyMode : 'plan';
-  let accessMode =
-    typeof persisted?.agyAccessMode === 'string' && Object.hasOwn(SANDBOX_RANK, persisted.agyAccessMode)
-      ? persisted.agyAccessMode
-      : mode === 'plan'
-        ? 'read-only'
-        : 'workspace-write';
-  let fullAccess = persisted?.agyFullAccess === true && mode !== 'plan' && accessMode === 'danger-full-access';
-  if (live) {
-    const liveMode = Object.hasOwn(SANDBOX_RANK, live.sandboxMode) ? live.sandboxMode : 'read-only';
-    if (live.planMode === true || liveMode === 'read-only') {
-      mode = 'plan';
-      fullAccess = false;
-      accessMode = liveMode === 'read-only' ? 'read-only' : 'workspace-write';
-    } else {
-      if (liveMode !== 'danger-full-access') fullAccess = false;
-      if (SANDBOX_RANK[accessMode] > SANDBOX_RANK[liveMode]) accessMode = liveMode;
-      if (!fullAccess && accessMode === 'danger-full-access') accessMode = 'workspace-write';
-    }
-  }
-  if (mode === 'plan') fullAccess = false;
-  return { mode, planMode: mode === 'plan', fullAccess, accessMode, live: Boolean(live) };
-}
-
-/**
- * 契约 2.3：解析可用于拉起 Stdio MCP 子进程的纯 Node 可执行文件。
- * Electron 宿主里 process.execPath 是 Electron 本体，绝不能直接拿来跑脚本。
- */
-async function resolveNodeExecutable(options = {}) {
-  const execPath = options.execPath ?? process.execPath;
-  const versions = options.versions ?? process.versions;
-  const platform = options.platform ?? process.platform;
-  const resourcesPath = options.resourcesPath ?? process.resourcesPath;
-  const existsSync = typeof options.existsSync === 'function' ? options.existsSync : fs.existsSync;
-  const subprocess = options.subprocess ?? null;
-  const safeExists = (p) => {
-    try {
-      return Boolean(p) && existsSync(p);
-    } catch {
-      return false;
-    }
-  };
-  if (!versions?.electron && safeExists(execPath)) return execPath;
-  const exe = platform === 'win32' ? 'node.exe' : 'node';
-  // 以「安装根」为锚点现算候选：Electron 的 process.resourcesPath 直接指向 <install>/resources，
-  // 非 Electron 场景回落到 execPath 所在目录。两者都不含任何盘符 / 用户名硬编码。
-  const installRoots = [];
-  const pushRoot = (value) => {
-    if (typeof value !== 'string' || !value) return;
-    const resolved = path.resolve(value);
-    if (!installRoots.includes(resolved)) installRoots.push(resolved);
-  };
-  if (typeof resourcesPath === 'string' && resourcesPath) {
-    // <install>/resources → 安装根；同时直接把 resources 目录本身也作为锚点（CLI 布局）。
-    pushRoot(path.dirname(path.resolve(resourcesPath)));
-    pushRoot(path.resolve(resourcesPath));
-  }
-  const execDir = execPath ? path.dirname(String(execPath)) : '';
-  if (execDir) pushRoot(execDir);
-  const candidates = [];
-  for (const root of installRoots) {
-    for (const candidate of [
-      path.resolve(root, ...NODE_RUNTIME_RELATIVE_DIRS, exe),
-      path.resolve(root, 'runtime', 'primary-runtime', 'dependencies', 'node', 'bin', exe),
-      path.resolve(root, 'node_modules', '.bin', exe),
-    ]) {
-      if (!candidates.includes(candidate)) candidates.push(candidate);
-    }
-  }
-  for (const candidate of candidates) {
-    if (safeExists(candidate)) return candidate;
-  }
-  if (subprocess && typeof subprocess.resolveExecutable === 'function') {
-    try {
-      const resolved = await subprocess.resolveExecutable('node');
-      if (typeof resolved === 'string' && resolved) return resolved;
-    } catch {
-      // fall through
-    }
-  }
-  throw new Error(
-    '无法定位纯 Node 可执行文件以启动 Swarm MCP 桥（Electron 宿主下 process.execPath 不可用）；请在插件配置 nodeExecutable 中指定 node.exe'
-  );
-}
-
-/** 生成一个比文本内最长反引号串更长的围栏，使归档正文中的 @ 不会被当作门铃。 */
-function fenceAroundText(text) {
-  const runs = String(text).match(/`+/g) || [];
-  const longest = runs.reduce((max, run) => Math.max(max, run.length), 0);
-  const fence = '`'.repeat(Math.max(3, longest + 1));
-  return `${fence}text\n${text}\n${fence}`;
 }
 
 /**
@@ -1129,59 +642,6 @@ function redactErrorText(value, maxChars = 400) {
 /** 活动摘要（工具名 / 思考片段 / 回复片段）统一脱敏并限长。 */
 function redactActivityText(value, maxChars = 160) {
   return redactSensitiveText(value, { maxChars });
-}
-
-const MAX_AGY_DENIED_SUMMARY_ITEMS = 3;
-const MAX_AGY_DENIED_NAME_CHARS = 80;
-const MAX_AGY_DENIED_REASON_CHARS = 120;
-
-function collapseSingleLineText(value) {
-  return String(value ?? '').replace(/\s+/g, ' ').trim();
-}
-
-/**
- * 将 `dsh-agy-acp` 返回的 `deniedActions` 整理为去重、限条数且脱敏的有界摘要。
- * 优先取纯工具名 `name`（避免把可能带参数片段的 `tool` 摘要优先塞进错误栏）。
- */
-function formatAgyDeniedActionsSummary(rawActions) {
-  const list = Array.isArray(rawActions) ? rawActions : [];
-  if (list.length === 0) return '';
-  const uniqueEntries = [];
-  const seen = new Set();
-  let validCount = 0;
-  for (const item of list) {
-    if (!item || typeof item !== 'object') continue;
-    const rawLabel =
-      collapseSingleLineText(item.name) || collapseSingleLineText(item.tool) || 'unknown';
-    const safeLabel = redactSensitiveText(rawLabel, { maxChars: MAX_AGY_DENIED_NAME_CHARS });
-    const rawReason = collapseSingleLineText(item.reason);
-    const safeReason = rawReason
-      ? redactSensitiveText(rawReason, { maxChars: MAX_AGY_DENIED_REASON_CHARS })
-      : '';
-    const entry = safeReason ? `${safeLabel} — ${safeReason}` : safeLabel;
-    validCount += 1;
-    if (!seen.has(entry)) {
-      seen.add(entry);
-      if (uniqueEntries.length < MAX_AGY_DENIED_SUMMARY_ITEMS) {
-        uniqueEntries.push(entry);
-      }
-    }
-  }
-  if (validCount === 0 || uniqueEntries.length === 0) return '';
-  const countTag = validCount > 1 ? ` ${validCount} 次` : '';
-  const moreTag = seen.size > uniqueEntries.length ? ' 等' : '';
-  return `本轮记录到权限拒绝${countTag}：${uniqueEntries.join('；')}${moreTag}`;
-}
-
-function formatAgyEmptyTurnError(result) {
-  const rawDenied = Array.isArray(result?.deniedActions)
-    ? result.deniedActions
-    : Array.isArray(result?.denied_actions)
-      ? result.denied_actions
-      : [];
-  const summary = formatAgyDeniedActionsSummary(rawDenied);
-  if (!summary) return AGY_EMPTY_TURN_MESSAGE;
-  return `${AGY_EMPTY_TURN_MESSAGE}（${summary}）`;
 }
 
 function parseToolArgumentsObject(raw) {
@@ -1468,17 +928,13 @@ class SwarmHostController {
     this.activeStreamWakers = new Set();
     /** Per-store member names reserved while an add is in flight. */
     this.creatingNames = new Map();
-    /** 二期：惰性创建的 Swarm 专属 MCP Loopback 桥。 */
-    this.mcpBridge = null;
-    /** 二期：运行中的 agy 轮次（memberSessionId -> { epoch, promise, coordinatorSessionId, memberName }）。 */
-    this.agyTurns = new Map();
     /** `/swarm <task>` 待注入上下文映射（messageId -> { sessionId, panelUri, graphUri, commandId }）。 */
     this.pendingCommandInjections = new Map();
     /** 轻量队列 ID 镜像（sessionId -> { 'next-turn': string[], 'next-step': string[] }），用于跟踪 QueueDock 编辑/移除。 */
     this.pendingInboxMirrors = new Map();
   }
 
-  /** 热更新运行期配置（设置页保存 / loader/volatile-update）：不改动既有成员与桥。 */
+  /** 热更新运行期配置（设置页保存 / loader/volatile-update）：不改动既有成员。 */
   applyConfig(next = {}) {
     if (this.disposed) return false;
     const normalized = normalizeSwarmConfig({ ...this.config, ...next });
@@ -1489,7 +945,6 @@ class SwarmHostController {
   async dispose() {
     if (this.disposed) {
       await Promise.allSettled([...this.inFlightOps]);
-      await this._closeMcpBridge();
       this.stores.dispose();
       return;
     }
@@ -1507,20 +962,6 @@ class SwarmHostController {
       }
     }
     this.memberAborts.clear();
-    // 二期：吊销全部桥 Token，并通知 agy 服务停止仍在运行的外部队友轮次。
-    try {
-      this.mcpBridge?.revokeAll();
-    } catch {
-      // ignore
-    }
-    const agySvc = this._getAgyService();
-    for (const turn of this.agyTurns.values()) {
-      try {
-        agySvc?.stopWorker?.(turn.coordinatorSessionId, turn.agyWorkerName);
-      } catch {
-        // ignore
-      }
-    }
     for (const sessionId of [...this.monitorTasks.keys()]) {
       this._clearMonitorTasksForSession(sessionId);
     }
@@ -1546,10 +987,8 @@ class SwarmHostController {
         this.memberAborts.delete(sessionId);
       })
     );
-    this.agyTurns.clear();
     this.pendingCommandInjections.clear();
     this.pendingInboxMirrors.clear();
-    await this._closeMcpBridge();
     this.stores.dispose();
   }
 
@@ -1764,7 +1203,6 @@ class SwarmHostController {
       panelUri: matchedMeta.panelUri,
       graphUri: matchedMeta.graphUri,
       compact,
-      agyAcpAvailable: this._isAgyAcpAvailable(),
     });
 
     return createUserMessageCompat({
@@ -1775,16 +1213,6 @@ class SwarmHostController {
         form: 'instructions',
       },
     });
-  }
-
-  async _closeMcpBridge() {
-    const bridge = this.mcpBridge;
-    if (!bridge) return;
-    try {
-      await bridge.close();
-    } catch {
-      // ignore teardown errors
-    }
   }
 
   /** Cancel one live agent with a legal host AgentCancelCause. */
@@ -1986,7 +1414,7 @@ class SwarmHostController {
    * - `includeBlocked: true`（设置页 `getSwarmModels`）：保留全部条目并附带
    *   `{ allowed, blocked }` 标记，供勾选面板展示完整目录。
    */
-  async listAvailableModels({ probeAgy = false, includeBlocked = false } = {}) {
+  async listAvailableModels({ includeBlocked = false } = {}) {
     const results = [];
     const seen = new Set();
     const llm = this.ctx?.get?.('llm') || this.ctx?.llm;
@@ -2053,14 +1481,6 @@ class SwarmHostController {
       }
     }
 
-    // 二期：拼入 agy 外部模型目录。默认零进程（peekModels）；仅 probeAgy 时按需探测真实目录。
-    const agyEntries = await this._listAgyModelEntries({ probeAgy });
-    for (const entry of agyEntries) {
-      if (seen.has(entry.key)) continue;
-      seen.add(entry.key);
-      results.push(entry);
-    }
-
     const ranked = results.map((entry) => ({
       entry,
       state: describeModelRuleState(this.config, entry),
@@ -2076,112 +1496,21 @@ class SwarmHostController {
   }
 
   /**
-   * Typert `getSwarmModels` 的数据源：设置页专用，永远 `probeAgy: false`，
-   * 即零子进程启动；被禁条目保留并附带 `allowed` / `blocked` 标记。
+   * Typert `getSwarmModels` 的数据源：设置页专用，零子进程启动；
+   * 被禁条目保留并附带 `allowed` / `blocked` 标记。
    */
   async listSwarmModelsResult() {
-    const models = await this.listAvailableModels({ probeAgy: false, includeBlocked: true });
+    const models = await this.listAvailableModels({ includeBlocked: true });
     return {
       models: models.map((entry) => ({
         key: entry.key,
         provider: entry.provider,
         model: entry.model,
         name: entry.name,
-        backend: entry.backend || 'dsh',
+        backend: 'dsh',
         allowed: entry.allowed === true,
         blocked: entry.blocked === true,
       })),
-    };
-  }
-
-  /** agy 模型条目（provider:"agy"、key:"agy/<value>"、backend:"agy-acp"）。 */
-  async _listAgyModelEntries({ probeAgy = false } = {}) {
-    const agySvc = this._getAgyService();
-    if (!agySvc) return [];
-    let catalog = null;
-    if (probeAgy && typeof agySvc.listModels === 'function') {
-      try {
-        catalog = await agySvc.listModels({});
-      } catch {
-        catalog = null; // 探测失败降级回 peekModels，不阻断整体列表
-      }
-    }
-    if (!catalog && typeof agySvc.peekModels === 'function') {
-      try {
-        catalog = agySvc.peekModels();
-      } catch {
-        catalog = null;
-      }
-    }
-    const models = Array.isArray(catalog?.models) ? catalog.models : [];
-    const efforts = Array.isArray(catalog?.efforts) ? catalog.efforts : [];
-    return models
-      .filter((m) => m && typeof m.value === 'string' && m.value)
-      .map((m) => ({
-        provider: 'agy',
-        model: m.value,
-        key: `agy/${m.value}`,
-        name: `[AGY ACP] ${typeof m.name === 'string' && m.name ? m.name : m.value}`,
-        description:
-          '外部 Antigravity CLI（dsh-agy-acp）' +
-          (efforts.length > 0 ? `；档位后缀 -${efforts.join(' / -')}` : ''),
-        backend: AGY_BACKEND,
-      }));
-  }
-
-  /**
-   * 可选扩展 dsh-agy-acp 是否可用。
-   *
-   * 未安装该扩展时，插件必须对用户完全友好：既不注入 `agy/<model>` 派发说明，
-   * 也不在协调员技能里暗示存在外部 ACP 队友。
-   */
-  _isAgyAcpAvailable() {
-    const svc = this._getAgyService();
-    return Boolean(svc && typeof svc.runDirectTurn === 'function');
-  }
-
-  /** 读取 dsh-agy-acp 服务（未挂载返回 null，绝不抛错）。 */
-  _getAgyService() {
-    if (this.config?.agyService) return this.config.agyService;
-    try {
-      const svc = this.ctx?.get?.('agyAcp');
-      if (svc) return svc;
-    } catch {
-      // Cordis 对未注入服务可能抛错：视为未启用
-    }
-    try {
-      return this.ctx?.agyAcp || null;
-    } catch {
-      return null;
-    }
-  }
-
-  /**
-   * 契约 1.1：解析 `agy/<spec>`。前置 fail-fast：插件未挂载、未知模型、锁档冲突当场报错。
-   */
-  _resolveAgyModel(requested) {
-    const clean = String(requested ?? '').trim();
-    const agySvc = this._getAgyService();
-    if (!agySvc) {
-      throw new Error(`当前宿主未启用 dsh-agy-acp 插件，无法使用外部模型 "${clean}"`);
-    }
-    if (typeof agySvc.normalizeModelSpec !== 'function') {
-      throw new Error(
-        `当前 dsh-agy-acp 版本不支持 normalizeModelSpec（需二期版本），无法使用外部模型 "${clean}"`
-      );
-    }
-    let spec;
-    try {
-      spec = agySvc.normalizeModelSpec(agySubSpec(clean));
-    } catch (err) {
-      throw new Error(`无法解析外部模型 "${clean}"：${extractErrorMessage(err)}`);
-    }
-    return {
-      backend: AGY_BACKEND,
-      provider: 'agy',
-      model: spec.model,
-      reasoningEffort: spec.effort || '',
-      modelDisplay: `agy/${spec.model}`,
     };
   }
 
@@ -2194,6 +1523,16 @@ class SwarmHostController {
    */
   async resolveRequestedModel(requestedModel, fallbackRoute) {
     const requested = typeof requestedModel === 'string' ? requestedModel.trim() : '';
+    // 解析前只做「显式黑名单」早退：原始写法直接命中 blockedModels 时立刻报黑名单错误，
+    // 免得被更靠后的「未配置 provider」掩盖。
+    //
+    // 白名单**不能**在这一步判定：调用方可能传裸模型名（`ok`）或显示名（`Friendly`），
+    // 它们要先解析成 `native/ok` 才具备可比对的规则键；提前跑白名单会把合法写法误杀。
+    // 完整的 assertSwarmModelAllowed（strictAllowlist + allowedModels + blockedModels）
+    // 统一在解析出最终 provider/model 之后执行。
+    if (requested && describeModelRuleState(this.config, requested).blocked) {
+      assertSwarmModelAllowed(this.config, requested);
+    }
     const resolved = await this._resolveRequestedModelRoute(requestedModel, fallbackRoute);
     assertSwarmModelAllowed(
       this.config,
@@ -2203,15 +1542,34 @@ class SwarmHostController {
     return resolved;
   }
 
+  /**
+   * 宿主**实时注册**的 provider 名字集合（小写）。
+   *
+   * 返回 `null` 表示没有权威名单（宿主没挂 llm 服务、或读取失败）：
+   * 此时调用方跳过 provider 校验，退回「按 `provider/model` 原样透传」的宽松行为，
+   * 纯 Node 离线单测与极简宿主因此都不会被误伤。
+   */
+  async _listRegisteredProviderIds() {
+    const llm = this.ctx?.get?.('llm') || this.ctx?.llm;
+    if (!llm || typeof llm.listProviders !== 'function') return null;
+    let providers = [];
+    try {
+      providers = (await llm.listProviders()) || [];
+    } catch {
+      return null;
+    }
+    const ids = new Set();
+    for (const item of Array.isArray(providers) ? providers : []) {
+      const id = typeof item === 'string' ? item : item?.id || item?.provider;
+      if (typeof id === 'string' && id.trim()) ids.add(id.trim().toLowerCase());
+    }
+    return ids;
+  }
+
   /** 原始路由解析（不含权限闸门）：仅供 `resolveRequestedModel` 与内部诊断使用。 */
   async _resolveRequestedModelRoute(requestedModel, fallbackRoute) {
     const clean = typeof requestedModel === 'string' ? requestedModel.trim() : '';
-    // agy 路由优先且同步：绝不为 agy 解析触发 DSH 模型目录或 agy.exe 探测。
-    if (clean && isAgyModelSpec(clean)) {
-      return this._resolveAgyModel(clean);
-    }
-    const nativeCatalog = async () =>
-      (await this.listAvailableModels()).filter((m) => m.backend !== AGY_BACKEND);
+    const nativeCatalog = async () => this.listAvailableModels();
     if (!clean) {
       if (fallbackRoute?.provider && fallbackRoute?.model) {
         return {
@@ -2275,6 +1633,16 @@ class SwarmHostController {
     if (slashIdx > 0 && slashIdx < clean.length - 1) {
       const provider = clean.slice(0, slashIdx);
       const model = clean.slice(slashIdx + 1);
+      // 判定依据是宿主**实时注册的 provider 名字**，不是过滤后的模型条目：
+      // 一个已注册 provider 的 listModels 可能返回空、抛错，或它的条目被派发权限过滤掉，
+      // 这些都不该让它的合法模型被误判成「未配置 provider」；反过来，模型目录整体为空时
+      // 一个从未注册的 provider（例如已移除的后端）也必须被稳定拒绝。
+      const registeredProviders = await this._listRegisteredProviderIds();
+      if (registeredProviders && !registeredProviders.has(provider.toLowerCase())) {
+        throw new Error(
+          `无法解析模型 "${clean}"：宿主未配置 provider "${provider}"（请用 swarm{action:"models"} 查看已配置模型）`
+        );
+      }
       return {
         provider,
         model,
@@ -2540,7 +1908,6 @@ class SwarmHostController {
       cwd: member.cwd,
       channels: member.channels,
       isMonitor: isMonitorRoleOrName(member.name, member.role),
-      agyAcpAvailable: this._isAgyAcpAvailable(),
     });
   }
 
@@ -2812,25 +2179,6 @@ class SwarmHostController {
   }
 
   async _deliverPromptToMember(store, member, text, senderSessionId, deliveryOptions = {}) {
-    // 二期：agy-acp 外部队友没有 DSH 会话，非阻塞地拉起一轮 runDirectTurn 后立即返回。
-    if (member?.backend === AGY_BACKEND) {
-      const fresh = store.getMember(member.name);
-      if (
-        this.disposed ||
-        store.closed ||
-        !fresh ||
-        fresh.killed ||
-        this._isMemberAborted(member.sessionId)
-      ) {
-        throw new Error(`成员 "${member.name}" 在投递前已被取消（killed / disposed），拒绝投递`);
-      }
-      this._startAgyMemberTurn(store, fresh, text, {
-        batch: deliveryOptions.batch,
-        triggerAuthor: deliveryOptions.triggerAuthor,
-        isInitial: deliveryOptions.isInitial === true,
-      });
-      return;
-    }
     const live = await this._ensureMemberLiveAgent(store, member);
     // The await above is a cancellation window. A kill (or controller dispose)
     // landing inside it must never be followed by a followup that reports
@@ -2852,7 +2200,7 @@ class SwarmHostController {
     store.updateMemberRuntimeState(member.sessionId, { state: 'working', lastError: '' });
   }
 
-  _formatWakeText(store, batch, stalledMembers = [], options = {}) {
+  _formatWakeText(store, batch, stalledMembers = []) {
     const formatted = batch
       .map((m) => {
         const chTag = m.channel && m.channel !== 'main' ? ' [#' + m.channel + ']' : '';
@@ -2870,13 +2218,6 @@ class SwarmHostController {
           stalledMembers.join(', ') +
           '] 已停止运行但尚未发布新留言（可能发生报错或提前休眠），请先调用 read_board{status: true} 检查成员状态。'
       );
-    }
-    if (options.agy === true) {
-      lines.push(
-        '',
-        '处理完毕后请调用 post_message（带 @收件人）汇报，然后直接结束本轮即可休眠（agy 队友无需 swarm_wait）。'
-      );
-      return lines.join('\n');
     }
     lines.push(
       '',
@@ -2956,25 +2297,16 @@ class SwarmHostController {
     if (!began) {
       return { name: member.name, woken: false, reason: 'no_new_messages' };
     }
-    const isAgy = member.backend === AGY_BACKEND;
     try {
       await this._deliverPromptToMember(
         store,
         member,
-        this._formatWakeText(store, began.batch, began.stalledMembers, { agy: isAgy }),
-        undefined,
-        isAgy
-          ? { batch: began.batch, triggerAuthor: this._pickTriggerAuthor(store, member, began.batch) }
-          : {}
+        this._formatWakeText(store, began.batch, began.stalledMembers)
       );
       store.ackWakeDelivery(member.name, began.maxSeq);
       return { name: member.name, woken: true, delivered_seq: began.maxSeq };
     } catch (err) {
       const message = extractErrorMessage(err) || 'unknown wake failure';
-      if (err && err.circuitBreak === true) {
-        // _startAgyMemberTurn 已按契约 3.3 调用 failWakeDelivery 收敛，不重复记账。
-        return { name: member.name, woken: false, error: message, circuit_break: true };
-      }
       try {
         store.failWakeDelivery(member.name, message, 'stopped');
         this._wakeUnblockedWaiters(store);
@@ -3027,10 +2359,8 @@ class SwarmHostController {
     if (action === 'models') {
       const callerRoute = readAgentModelRoute(exec?.agent);
       const showAll = Boolean(args?.all);
-      const allModels = await this.listAvailableModels({ probeAgy: showAll });
-      const nativeModels = allModels.filter((m) => m.backend !== AGY_BACKEND);
-      const agyModels = allModels.filter((m) => m.backend === AGY_BACKEND);
-      const filtered = showAll ? allModels : [...nativeModels.slice(0, 24), ...agyModels];
+      const allModels = await this.listAvailableModels();
+      const filtered = showAll ? allModels : allModels.slice(0, 24);
       return {
         current_model:
           callerRoute.provider && callerRoute.model
@@ -3084,10 +2414,6 @@ class SwarmHostController {
       const { member, alreadyKilled } = store.markMemberKilled(callerName, targetName);
       this._clearMonitorTasksForSession(member.sessionId);
       this._abortMember(member.sessionId, 'killed by swarm');
-      if (member.backend === AGY_BACKEND) {
-        // 契约 3.4：吊销桥 Token、停止 agy 轮次并移除 agy-acp 注册表记录。
-        this._stopAgyMember(store, member, { removeRegistry: true });
-      }
 
       const liveHandle = this.liveHandles.get(member.sessionId);
       const agentsSvc = this.ctx?.get?.('agents') || this.ctx?.agents;
@@ -3122,21 +2448,6 @@ class SwarmHostController {
       store.assertPermission(callerName, 'model', targetName);
 
       const callerRoute = readAgentModelRoute(callerAgent);
-      const targetRow = store.getMember(targetName);
-      const targetIsAgy = targetRow?.backend === AGY_BACKEND;
-      const requestIsAgy = isAgyModelSpec(args?.model);
-      if (targetIsAgy || requestIsAgy) {
-        return this._switchAgyMemberModel({
-          store,
-          callerName,
-          callerAgent,
-          targetName,
-          targetRow,
-          targetIsAgy,
-          requestIsAgy,
-          args,
-        });
-      }
       const resolvedModel = await this.resolveRequestedModel(args?.model, callerRoute);
       const currentMember = store.getMember(targetName);
       const agentsSvc = this.ctx?.get?.('agents') || this.ctx?.agents;
@@ -3229,30 +2540,8 @@ class SwarmHostController {
       tasks: args.tasks,
     });
 
-    // 二期：agy-acp 外部队友的能力边界，一律在任何 await / 资源分配前 fail-fast。
-    const wantsAgy = isAgyModelSpec(args.model);
-    if (wantsAgy) {
-      const forkRaw = typeof args.fork === 'string' ? args.fork.trim().toLowerCase() : args.fork;
-      if (forkRaw !== undefined && forkRaw !== null && forkRaw !== false && forkRaw !== '' && forkRaw !== 'false') {
-        throw new Error('agy 外部成员不支持 fork（无法继承 DSH 会话历史），请去掉 fork 或改用 DSH 原生模型');
-      }
-      const wsRaw = typeof args.workspace === 'string' ? args.workspace.trim().toLowerCase() : '';
-      if (wsRaw === 'share' && typeof this.config.workspacePrepare !== 'function') {
-        throw new Error('agy 外部成员暂不支持 workspace:"share"（宿主 worktree 只能绑定 DSH 会话），请使用 inherit');
-      }
-      for (const spec of specs) {
-        if (isMonitorRoleOrName(spec.name)) {
-          throw new Error(
-            `agy 外部成员不能担任 monitor（"${spec.name}" 需要 schedule / manage_task 宿主工具），请用 DSH 原生模型拉起 monitor`
-          );
-        }
-      }
-    } else if (args.agy_mode !== undefined && args.agy_mode !== null && args.agy_mode !== '') {
-      throw new Error('agy_mode 仅对 model:"agy/<model>" 的外部成员生效');
-    }
-
     const agentsSvc = this.ctx?.get?.('agents') || this.ctx?.agents;
-    if (!wantsAgy && (!agentsSvc || typeof agentsSvc.create !== 'function')) {
+    if (!agentsSvc || typeof agentsSvc.create !== 'function') {
       throw new Error('宿主未提供 ctx.agents.create，无法创建 Swarm Worker 会话');
     }
     const coordAgent =
@@ -3269,7 +2558,7 @@ class SwarmHostController {
         `Swarm 委派深度超限：调用方有效深度 ${parentDepth}，派生子成员后为 ${childDepth}，超过上限 ${MAX_SWARM_DELEGATION_DEPTH}`
       );
     }
-    const delegatedPolicies = wantsAgy ? null : captureDelegatedPolicyOverrides(creatorAgent);
+    const delegatedPolicies = captureDelegatedPolicyOverrides(creatorAgent);
     const presetsSvc = this.ctx?.get?.('agentPresets') || this.ctx?.agentPresets;
     const composedPreset = presetsSvc?.composedPreset?.(creatorAgent?.ctx);
     const memberPresetRaw = composedPreset ?? creatorAgent?.session?.header?.agentPreset;
@@ -3278,16 +2567,6 @@ class SwarmHostController {
     // Validate the workspace mode before any await: an unsupported mode must
     // never reach a model catalog call, let alone a worktree or child session.
     const requestedWorkspace = normalizeWorkspaceMode(args.workspace);
-    // 二期：agy 成员的模式与权限同样在第一个 await 之前按调用方当下策略捕获；
-    // 外部 agy 路径要求宿主 sandboxPolicy 必须给出合法 mode，否则 fail-closed 拒绝（P1-3）。
-    const agyPolicy = wantsAgy
-      ? resolveAgyPolicy({
-          sandboxMode: readStrictSandboxMode(this.ctx, creatorAgent),
-          planMode: readCallerPlanMode(this.ctx, creatorAgent),
-          requestedMode: args.agy_mode,
-        })
-      : null;
-
     const reservedNames = [];
     try {
       for (const spec of specs) {
@@ -3342,23 +2621,6 @@ class SwarmHostController {
       const addedMembers = [];
 
       for (const spec of specs) {
-        if (wantsAgy) {
-          addedMembers.push(
-            await this._addAgyMember({
-              store,
-              coordinatorSessionId,
-              callerName,
-              spec,
-              resolvedModel,
-              agyPolicy,
-              requestedWorkspace,
-              baseCwd,
-              requestedChannels,
-              childDepth,
-            })
-          );
-          continue;
-        }
         const childSessionId = crypto.randomUUID();
         const opAbort = this._memberAbort(childSessionId);
         let createdHandle = null;
@@ -3656,8 +2918,6 @@ class SwarmHostController {
 
     if (markedDone) {
       this._clearAllMonitorTasksForSwarm(store);
-      // 契约 3.4：[done] 结项时吊销 agy 桥 Token 并停止仍在运行的外部队友轮次。
-      this._shutdownAgyMembersForDone(store);
       this._maybeReleaseDoneStoreLock(store);
       return {
         status: 'posted',
@@ -3706,719 +2966,6 @@ class SwarmHostController {
     }
     const pending = pendingTargets.map((m) => m.name);
     return { woken, wakeErrors, pending, steered };
-  }
-
-  /* ------------------------------------------------------------------ */
-  /* 二期：agy-acp 外部队友（契约 1 / 2 / 3）                              */
-  /* ------------------------------------------------------------------ */
-
-  /** 惰性创建 Swarm 专属 MCP 桥（listen 推迟到首个 agy 轮次）。 */
-  _ensureMcpBridge() {
-    if (this.mcpBridge) return this.mcpBridge;
-    this.mcpBridge = new SwarmMcpBridgeServer({
-      baseDir: this.stores.baseDir,
-      maxPostsPerTurn:
-        Number.isSafeInteger(this.config.maxAgyPostsPerTurn) && this.config.maxAgyPostsPerTurn > 0
-          ? this.config.maxAgyPostsPerTurn
-          : MAX_POSTS_PER_TURN,
-      resolveStore: (coordinatorSessionId) => this.stores.getOrLoadStore(coordinatorSessionId),
-      isDisposed: () => this.disposed,
-      onReadBoard: (context) => this._bridgeReadBoard(context),
-      onPostMessage: (context) => this._bridgePostMessage(context),
-    });
-    return this.mcpBridge;
-  }
-
-  /** 桥 read_board：身份固定为 grant.memberName。 */
-  _bridgeReadBoard({ store, member, callerName, args }) {
-    const toInt = (value) => (Number.isSafeInteger(value) ? value : undefined);
-    const result = store.readBoard(callerName, {
-      since: toInt(args.since),
-      limit: toInt(args.limit),
-      seqs: Array.isArray(args.seqs) ? args.seqs.filter((n) => Number.isSafeInteger(n)) : undefined,
-      channel: typeof args.channel === 'string' && args.channel ? args.channel : undefined,
-      status: args.status === true,
-    });
-    if (args.inbox_only === true && Array.isArray(result.messages)) {
-      const fresh = store.getMember(member.name) || member;
-      return {
-        ...result,
-        messages: result.messages.filter((msg) => store.doesMessageTriggerMember(fresh, msg, true)),
-        inbox_only: true,
-      };
-    }
-    return result;
-  }
-
-  /** 桥 post_message：作者固定为 grant.memberName，并按门铃唤醒收件人。 */
-  async _bridgePostMessage({ store, authorName, args }) {
-    const text = typeof args.text === 'string' ? args.text : '';
-    const channel = typeof args.channel === 'string' && args.channel ? args.channel : undefined;
-    const outcome = store.postMessage(authorName, text, { channel });
-    const { woken, wakeErrors, pending } = await this._dispatchPostWakes(store, outcome);
-    return {
-      status: 'posted',
-      seq: outcome.message.seq,
-      channel: outcome.message.channel,
-      woken,
-      ...(pending.length > 0 ? { pending_wakeup: pending } : {}),
-      ...(wakeErrors.length > 0 ? { wake_errors: wakeErrors } : {}),
-      head: outcome.head,
-    };
-  }
-
-  /** 由最后一条命中该成员门铃的消息作者充当「触发者」（自动归档的默认收件人）。 */
-  _pickTriggerAuthor(store, member, batch) {
-    if (!Array.isArray(batch) || batch.length === 0) return '';
-    for (let index = batch.length - 1; index >= 0; index -= 1) {
-      const msg = batch[index];
-      try {
-        if (store.doesMessageTriggerMember(member, msg, true)) return msg.agent;
-      } catch {
-        // ignore malformed message
-      }
-    }
-    return batch[batch.length - 1]?.agent || '';
-  }
-
-  /**
-   * 契约 2.3 的 Node 解析（配置覆盖 → 纯 Node execPath → 宿主捆绑 Node → resolveExecutable）。
-   *
-   * `config.nodeExecutable` 一律先 trim，再校验「存在且不是目录」：
-   * 无效路径必须当场报明确错误，绝不把这个值盲目透传给 subprocess。
-   */
-  async _resolveNodeExecutable() {
-    const configured = typeof this.config.nodeExecutable === 'string' ? this.config.nodeExecutable.trim() : '';
-    if (configured) {
-      let stat = null;
-      try {
-        stat = fs.statSync(configured);
-      } catch {
-        stat = null;
-      }
-      if (!stat) {
-        throw new Error(`配置项 nodeExecutable 指向的路径不存在：${configured}`);
-      }
-      if (typeof stat.isDirectory === 'function' && stat.isDirectory()) {
-        throw new Error(`配置项 nodeExecutable 指向的是目录而非可执行文件：${configured}`);
-      }
-      return configured;
-    }
-    let subprocess = null;
-    try {
-      subprocess = this.ctx?.get?.('subprocess') || this.ctx?.subprocess || null;
-    } catch {
-      subprocess = null;
-    }
-    return resolveNodeExecutable({ subprocess });
-  }
-
-  /** 契约 1：拉起一个 agy-acp 外部成员（不创建任何 DSH 会话）。 */
-  async _addAgyMember({
-    store,
-    coordinatorSessionId,
-    callerName,
-    spec,
-    resolvedModel,
-    agyPolicy,
-    requestedWorkspace,
-    baseCwd,
-    requestedChannels,
-    childDepth,
-  }) {
-    const agySvc = this._getAgyService();
-    if (!agySvc || typeof agySvc.runDirectTurn !== 'function') {
-      throw new Error('当前宿主未启用 dsh-agy-acp 插件（缺少 runDirectTurn），无法拉起 agy 外部成员');
-    }
-    const memberSessionId = `agy-${crypto.randomUUID()}`;
-    const agyWorkerName = makeAgyWorkerName(spec.name, coordinatorSessionId, memberSessionId);
-    let registered = null;
-    try {
-      const member = store.registerMember({
-        name: spec.name,
-        sessionId: memberSessionId,
-        addedBy: callerName,
-        provider: 'agy',
-        model: resolvedModel.model,
-        modelDisplay: resolvedModel.modelDisplay,
-        reasoningEffort: resolvedModel.reasoningEffort,
-        workspace: requestedWorkspace,
-        workspaceDir: '',
-        cwd: baseCwd,
-        channels: requestedChannels,
-        delegationDepth: childDepth,
-        agentPreset: '',
-        backend: AGY_BACKEND,
-        agySessionId: null,
-        agyWorkerName,
-        agyMode: agyPolicy.mode,
-        agyFullAccess: agyPolicy.fullAccess,
-        agyAccessMode: agyPolicy.accessMode,
-      });
-      registered = member;
-      this._memberAbort(memberSessionId);
-
-      if (requestedWorkspace === 'share' && typeof this.config.workspacePrepare === 'function') {
-        const customWs = await this.config.workspacePrepare({
-          coordinatorSessionId,
-          memberName: member.name,
-          childSessionId: memberSessionId,
-          baseCwd,
-          mode: 'share',
-          branchName: `swarm-${shortSha256(coordinatorSessionId, 8)}-${member.name}-${shortSha256(memberSessionId, 4)}`,
-          agent: null,
-          signal: this._memberAbort(memberSessionId).signal,
-        });
-        const wsPath = customWs?.path || customWs?.cwd || customWs?.workspaceDir || baseCwd;
-        member.cwd = wsPath;
-        member.workspaceDir = customWs?.workspaceDir ?? wsPath;
-        store._persistState();
-      }
-      if (this.disposed || store.closed || member.killed) {
-        throw new Error(`成员 "${member.name}" 的创建在完成前已被取消（killed / controller dispose）`);
-      }
-
-      member.state = 'working';
-      const briefPost = store.postMessage(callerName, `@${member.name} ${spec.brief}`);
-      member.lastReadSeq = briefPost.head;
-      member.pendingWakeup = false;
-      store._persistState();
-
-      const initialBody = [
-        `你的初始任务已记录在公共留言板 #${briefPost.message.seq}（由 @${callerName} 发布，当前留言板最新序号 #${briefPost.head}）：`,
-        '',
-        spec.brief,
-        '',
-        `完成后请调用 post_message 并 @${callerName} 汇报结果，然后直接结束本轮。`,
-      ].join('\n');
-      this._startAgyMemberTurn(store, member, initialBody, {
-        triggerAuthor: callerName,
-        isInitial: true,
-      });
-
-      return {
-        name: member.name,
-        sessionId: member.sessionId,
-        model: member.modelDisplay,
-        backend: AGY_BACKEND,
-        agy_mode: member.agyMode,
-        agy_worker: agyWorkerName,
-        workspace: member.workspace,
-        cwd: member.cwd,
-        brief_seq: briefPost.message.seq,
-      };
-    } catch (err) {
-      if (registered && !registered.killed) {
-        try {
-          store.markMemberKilled('coordinator', registered.name);
-        } catch {
-          // rollback bookkeeping is best effort
-        }
-        this._stopAgyMember(store, registered, { removeRegistry: true });
-      }
-      this.memberAborts.delete(memberSessionId);
-      throw err;
-    }
-  }
-
-  /**
-   * 契约 3.3 / 0.2：双阈值防死循环熔断。
-   * 阈值为 `0`（默认）表示**无限**：永不因该类计数熔断，自治内循环可无限轮次推进；
-   * 正整数阈值保持既有语义（`> 阈值` 才拦截），返回 { reason, nextPeerWakes, nextCount }。
-   */
-  _checkAgyCircuitBreaker(member, batch) {
-    const readLimit = (value, fallback) =>
-      Number.isSafeInteger(value) && value >= 0 ? value : fallback;
-    const maxPeer = readLimit(this.config.maxConsecutivePeerWakes, DEFAULT_MAX_CONSECUTIVE_PEER_WAKES);
-    const maxTurns = readLimit(this.config.maxAgyTurnsPerMember, DEFAULT_MAX_AGY_TURNS_PER_MEMBER);
-    let nextPeerWakes = member.consecutivePeerWakes || 0;
-    if (Array.isArray(batch)) {
-      nextPeerWakes = batch.some((m) => m?.agent === 'coordinator') ? 0 : nextPeerWakes + 1;
-    }
-    const nextCount = (member.activationCount || 0) + 1;
-    if (maxPeer > 0 && nextPeerWakes > maxPeer) {
-      return { reason: 'consecutive-peer-wakes', nextPeerWakes, nextCount };
-    }
-    if (maxTurns > 0 && nextCount > maxTurns) {
-      return { reason: 'max-turns', nextPeerWakes, nextCount };
-    }
-    return { reason: null, nextPeerWakes, nextCount };
-  }
-
-  /**
-   * 契约 3.1：同步完成熔断检查、激活代次递增与 working 落盘，再以受追踪的后台任务
-   * 执行一轮 agy；调用方（_deliverPromptToMember）立即返回。
-   */
-  _startAgyMemberTurn(store, member, bodyText, { batch, triggerAuthor, isInitial = false } = {}) {
-    const agySvc = this._getAgyService();
-    if (!agySvc || typeof agySvc.runDirectTurn !== 'function') {
-      throw new Error(`当前宿主未启用 dsh-agy-acp 插件，无法唤醒 agy 成员 "${member.name}"`);
-    }
-    if (this.agyTurns.has(member.sessionId)) {
-      throw new Error(`agy 成员 "${member.name}" 上一轮仍在运行，拒绝并发重入`);
-    }
-    const verdict = this._checkAgyCircuitBreaker(member, batch);
-    if (verdict.reason) {
-      store.failWakeDelivery(member.name, AGY_CIRCUIT_BREAK_MESSAGE, 'stopped');
-      if (!member.circuitBreakNotified) {
-        store.updateMemberAgyState(member.sessionId, { circuitBreakNotified: true });
-        this._wakeUnblockedWaiters(store);
-      }
-      const err = new Error(`${AGY_CIRCUIT_BREAK_MESSAGE}（${verdict.reason}）`);
-      err.circuitBreak = true;
-      err.code = 'SWARM_AGY_CIRCUIT_BREAK';
-      throw err;
-    }
-
-    const epoch = (member.activationEpoch || 0) + 1;
-    store.updateMemberAgyState(member.sessionId, {
-      activationEpoch: epoch,
-      activationCount: verdict.nextCount,
-      consecutivePeerWakes: verdict.nextPeerWakes,
-      circuitBreakNotified: false,
-    });
-    store.updateMemberAgyState(member.sessionId, {
-      // 契约 3.2：轮次一起跑就登记瞬态 agyLive，面板立刻能看到「排队/启动中」。
-      agyLive: { runId: '', phase: 'queued', pid: 0, activity: AGY_PHASE_LABELS.queued },
-    });
-    store.updateMemberRuntimeState(member.sessionId, {
-      state: 'working',
-      lastError: '',
-      activity: AGY_PHASE_LABELS.queued,
-    });
-
-    const promptText = buildAgyWorkerPromptEnvelope({
-      member,
-      coordinatorSessionId: store.coordinatorSessionId,
-      body: bodyText,
-      isInitial: isInitial === true || !member.agySessionId,
-    });
-    const turn = {
-      epoch,
-      coordinatorSessionId: store.coordinatorSessionId,
-      memberName: member.name,
-      agyWorkerName: member.agyWorkerName,
-      promise: null,
-    };
-    this.agyTurns.set(member.sessionId, turn);
-    // 同步捕获本轮取消信号：[done] / kill / session-stop 在 setImmediate 窗口内的 abort 也能被看到。
-    const turnSignal = this._memberAbort(member.sessionId).signal;
-    turn.promise = this._trackOp(
-      this._executeAgyMemberTurn({
-        store,
-        member,
-        promptText,
-        triggerAuthor: triggerAuthor || '',
-        epoch,
-        turnSignal,
-      })
-    ).catch(() => {});
-    return { epoch };
-  }
-
-  /**
-   * P1-2：轮次真正开跑前的统一闸门。任一条件命中即中止：不签发 Token、不调 runDirectTurn。
-   * @returns {boolean} true 表示已中止
-   */
-  _abortAgyTurnIfStale(store, member, epoch, turnSignal) {
-    const fresh = store.closed ? null : store.getMember(member.name);
-    const stale =
-      Boolean(turnSignal?.aborted) ||
-      this.disposed ||
-      store.closed ||
-      Boolean(store.state?.done) ||
-      !fresh ||
-      fresh.killed ||
-      (fresh.activationEpoch || 0) !== epoch;
-    if (!stale) return false;
-    const current = this.agyTurns.get(member.sessionId);
-    if (current && current.epoch === epoch) this.agyTurns.delete(member.sessionId);
-    if (!this.disposed && !store.closed && fresh && !fresh.killed) {
-      try {
-        // 启动窗口内被中止（[done] / kill / session-stop）：瞬态阶段一并清空，绝不留「生成中」假象。
-        store.updateMemberAgyState(fresh.sessionId, { agyLive: null });
-        store.updateMemberRuntimeState(fresh.sessionId, { state: 'stopped', activity: '' });
-        if (store.state.done) this._maybeReleaseDoneStoreLock(store);
-        else this._wakeUnblockedWaiters(store);
-      } catch {
-        // 留言板正在关闭时的收尾记账是尽力而为
-      }
-    }
-    return true;
-  }
-
-  /**
-   * P0-1：本轮实际运行权限 = 成员持久化权限 ∩ 在线协调员父会话当前策略（只收紧不提权）。
-   * 协调员在线但 sandboxPolicy 不可读时抛错（fail-closed，本轮按失败收敛）。
-   */
-  _resolveAgyTurnPolicy(store, member) {
-    let coordAgent = null;
-    try {
-      const agentsSvc = this.ctx?.get?.('agents') || this.ctx?.agents;
-      coordAgent = agentsSvc?.get?.(store.coordinatorSessionId) || null;
-    } catch {
-      coordAgent = null;
-    }
-    if (!coordAgent) return clampAgyTurnPolicy(member, null);
-    const sandboxMode = readStrictSandboxMode(this.ctx, coordAgent);
-    const planMode = readCallerPlanMode(this.ctx, coordAgent);
-    return clampAgyTurnPolicy(member, { sandboxMode, planMode });
-  }
-
-  /** 一轮 agy 的完整生命周期：签发 Token → runDirectTurn → 吊销 → 四象限收敛。 */
-  async _executeAgyMemberTurn({ store, member, promptText, triggerAuthor, epoch, turnSignal }) {
-    // 让出到下一个宏任务：保证 _wakeMember 的 ackWakeDelivery 先于任何收尾落盘。
-    await new Promise((resolve) => setImmediate(resolve));
-    const abort = { signal: turnSignal || this._memberAbort(member.sessionId).signal };
-    // P1-2：醒来后先过闸门，[done] / kill / dispose 落在启动窗口内时零 runDirectTurn。
-    if (this._abortAgyTurnIfStale(store, member, epoch, abort.signal)) return;
-    const agySvc = this._getAgyService();
-    let grant = null;
-    let result = null;
-    let failure = null;
-    try {
-      if (!agySvc || typeof agySvc.runDirectTurn !== 'function') {
-        throw new Error('dsh-agy-acp 服务不可用');
-      }
-      const bridge = this._ensureMcpBridge();
-      await bridge.ensureStarted();
-      const nodePath = await this._resolveNodeExecutable();
-      // 所有前置 await 均已结束：在同一同步帧内依次做终态闸门、实时父权限夹逼与签发 Token，
-      // 紧接着直接进入 runDirectTurn，彻底消除异步准备窗口内的父权限降级漏检与 [done] 逃逸。
-      if (this._abortAgyTurnIfStale(store, member, epoch, abort.signal)) return;
-      const freshForPolicy = store.getMember(member.name) || member;
-      const turnPolicy = this._resolveAgyTurnPolicy(store, freshForPolicy);
-      grant = bridge.issueTurnGrant({
-        coordinatorSessionId: store.coordinatorSessionId,
-        memberName: member.name,
-        memberSessionId: member.sessionId,
-        activationEpoch: epoch,
-      });
-
-      let lastActivityAt = 0;
-      const onUpdate = (update) => {
-        if (this.disposed || store.closed) return;
-        const now = Date.now();
-        if (now - lastActivityAt < AGY_ACTIVITY_THROTTLE_MS) return;
-        let activity = '';
-        if (update?.kind === 'tool_call') {
-          const call = update.toolCall || {};
-          activity = `agy: ${call.name || call.title || '工具调用'}`;
-        } else if (update?.kind === 'text') {
-          activity = 'agy 输出中';
-        } else if (update?.kind === 'thought') {
-          activity = 'agy 思考中';
-        } else {
-          return;
-        }
-        lastActivityAt = now;
-        try {
-          store.updateMemberRuntimeState(member.sessionId, { activity });
-        } catch {
-          // 活动行只是展示信息，失败不影响轮次
-        }
-      };
-
-      // 契约 3.2：agy-acp 的 onProgress 实时同步阶段 / runId / pid 到成员瞬态 agyLive。
-      // 只接受变化后的合法阶段，未知载荷静默忽略（旧版 agy-acp 根本不会调用它）。
-      let lastLive = '';
-      const onProgress = (live) => {
-        if (this.disposed || store.closed) return;
-        const described = describeAgyProgress(live);
-        if (!described) return;
-        // 同阶段内的 activity / runId 变化也必须落地：真实 agy 的「调用工具 / 思考中 / 生成回复」
-        // 都发生在 prompting 阶段内，只比较 phase+pid 会把这些更新全部丢掉。
-        const signature =
-          described.phase + '|' + String(described.pid) + '|' + described.runId + '|' + described.activity;
-        if (signature === lastLive) return;
-        lastLive = signature;
-        try {
-          store.updateMemberAgyState(member.sessionId, { agyLive: described });
-          store.updateMemberRuntimeState(member.sessionId, { activity: redactActivityText(described.activity) });
-        } catch {
-          // 阶段展示失败绝不影响本轮；下一段 progress 会重试
-        }
-      };
-
-      const fresh = store.getMember(member.name) || member;
-      result = await agySvc.runDirectTurn({
-        parentSessionId: store.coordinatorSessionId,
-        name: fresh.agyWorkerName,
-        title: `swarm:${fresh.name}`,
-        prompt: promptText,
-        cwd: fresh.cwd || undefined,
-        model: fresh.model,
-        effort: fresh.reasoningEffort || undefined,
-        effortExplicit: Boolean(fresh.reasoningEffort),
-        // P0-1：模式与权限取「持久化快照 ∩ 在线父会话当前策略」。
-        mode: turnPolicy.mode,
-        accessMode: turnPolicy.accessMode,
-        fullAccess: turnPolicy.fullAccess,
-        parentSandboxMode: turnPolicy.accessMode,
-        planMode: turnPolicy.planMode,
-        mcpServers: [
-          {
-            name: SWARM_MCP_SERVER_NAME,
-            command: nodePath,
-            args: [MCP_STDIO_ENTRY, '--auth-file', grant.authFilePath],
-            env: [],
-          },
-        ],
-        bridgeAllowlist: buildAgyBridgeAllowlist(),
-        agySessionId: fresh.agySessionId || undefined,
-        sessionMode: fresh.agySessionId ? 'load' : 'new',
-        wait: false,
-        signal: abort.signal,
-        onUpdate,
-        // 契约 3.2：让 agy-acp 的监控面板认出这是 Swarm 队友轮次并归到对应成员名下。
-        source: 'swarm',
-        swarmMeta: {
-          coordinatorSessionId: store.coordinatorSessionId,
-          memberName: fresh.name,
-          role: fresh.role || 'worker',
-        },
-        onProgress,
-      });
-    } catch (err) {
-      failure = err;
-      if (err && err.partial && typeof err.partial === 'object') result = err.partial;
-    } finally {
-      try {
-        grant?.revoke();
-      } catch {
-        // ignore
-      }
-      const current = this.agyTurns.get(member.sessionId);
-      if (current && current.epoch === epoch) this.agyTurns.delete(member.sessionId);
-    }
-
-    try {
-      this._settleAgyTurn({ store, member, result, failure, grant, triggerAuthor, epoch });
-    } catch {
-      // 收尾记账失败（例如留言板正在关闭）不得冒成未处理拒绝
-    }
-  }
-
-  /** 契约 3.2：四象限终态与未发帖纯文本兜底矩阵。 */
-  _settleAgyTurn({ store, member, result, failure, grant, triggerAuthor, epoch }) {
-    if (this.disposed || store.closed) return;
-    const fresh = store.getMember(member.name);
-    if (!fresh) return;
-
-    if (result && typeof result.agySessionId === 'string' && result.agySessionId && !fresh.killed) {
-      store.updateMemberAgyState(fresh.sessionId, { agySessionId: result.agySessionId });
-    }
-    if (!fresh.killed) {
-      // 契约 3.2：轮次结束（正常完成 / 失败 / 被 stopAcpRun 取消）一律清空瞬态 agyLive，
-      // 并把本轮的 turnUsageSummary 累加进持久化 agyUsage；旧版 agy-acp 无该字段则安全跳过。
-      const lastTurnTokens = extractAgyTurnUsage(result);
-      try {
-        store.updateMemberAgyState(fresh.sessionId, {
-          agyLive: null,
-          ...(lastTurnTokens
-            ? { agyUsage: mergeAgyUsage(fresh.agyUsage, lastTurnTokens) }
-            : {}),
-        });
-      } catch {
-        // 账单与阶段都是展示/统计信息，绝不因记账失败影响终态收敛
-      }
-    }
-    if (fresh.killed) return;
-    if ((fresh.activationEpoch || 0) !== epoch) return; // 已被更新的轮次接管
-
-    if (store.state.done) {
-      store.updateMemberRuntimeState(fresh.sessionId, { state: 'stopped', activity: '' });
-      this._maybeReleaseDoneStoreLock(store);
-      return;
-    }
-
-    const postCount = grant?.grantState?.postCount || 0;
-    const outputText = typeof result?.outputText === 'string' ? result.outputText : '';
-    const completed = !failure && result && result.status === 'completed';
-
-    // 象限 4：失败 / 取消 —— 绝不把残缺输出伪装成正式帖子
-    if (!completed) {
-      const detail =
-        (failure ? extractErrorMessage(failure) : '') ||
-        (result?.detail ? String(result.detail) : '') ||
-        `agy 轮次未成功（${String(result?.status || 'unknown')}）`;
-      store.updateMemberRuntimeState(fresh.sessionId, {
-        state: 'stopped',
-        activity: '',
-        lastError: redactErrorText(detail),
-      });
-      this._wakeUnblockedWaiters(store);
-      return;
-    }
-
-    // 象限 1：标准发帖完成
-    if (postCount > 0) {
-      store.updateMemberRuntimeState(fresh.sessionId, { lastError: '', activity: '' });
-      this.handleMemberIdle(fresh.sessionId);
-      return;
-    }
-
-    const trimmed = outputText.trim();
-    // 象限 3：空白静默异常（若有权限拒绝诊断则附上有界脱敏摘要，保留原 stopped 调度语义）
-    if (!trimmed) {
-      store.updateMemberRuntimeState(fresh.sessionId, {
-        state: 'stopped',
-        activity: '',
-        lastError: redactErrorText(formatAgyEmptyTurnError(result)),
-      });
-      this._wakeUnblockedWaiters(store);
-      return;
-    }
-
-    // 象限 2：漏调工具的纯文本完成 → 自动归档代发
-    store.updateMemberRuntimeState(fresh.sessionId, { lastError: '', activity: '' });
-    let outcome = null;
-    try {
-      outcome = this._autoArchiveAgyOutput(store, fresh, trimmed, triggerAuthor);
-    } catch (err) {
-      store.updateMemberRuntimeState(fresh.sessionId, {
-        lastError: redactErrorText(`自动归档 agy 回复失败：${extractErrorMessage(err)}`),
-      });
-    }
-    this.handleMemberIdle(fresh.sessionId);
-    if (outcome) {
-      this._dispatchPostWakes(store, outcome).catch(() => {});
-    }
-  }
-
-  /** 把漏调 post_message 的纯文本回复归档到 #main（必要时补齐 @收件人）。 */
-  _autoArchiveAgyOutput(store, member, trimmed, triggerAuthor) {
-    let hasDoorbell = false;
-    let parseable = true;
-    try {
-      const bells = parseMessageDoorbells(trimmed, store._membersMap(), store._channelsMap());
-      hasDoorbell =
-        bells.mentions.some((name) => name !== member.name) ||
-        bells.channelMentions.length > 0 ||
-        bells.broadcast === true;
-    } catch {
-      parseable = false; // 例如含 @#main 或不存在的 @#频道：正文改为围栏包裹再归档
-    }
-    if (parseable && hasDoorbell) {
-      return store.postMessage(member.name, `${AGY_AUTO_ARCHIVE_TAG}\n${trimmed}`);
-    }
-    let recipient = triggerAuthor || member.addedBy || 'coordinator';
-    const target = store.getMember(recipient);
-    if (!target || target.killed || target.name === member.name) recipient = 'coordinator';
-    const body = parseable ? trimmed : fenceAroundText(trimmed);
-    return store.postMessage(member.name, `@${recipient} ${AGY_AUTO_ARCHIVE_TAG}\n\n${body}`);
-  }
-
-  /** 吊销 Token 并停止某个 agy 成员的运行中轮次（kill / session-stop / 回滚）。 */
-  _stopAgyMember(store, member, { removeRegistry = false } = {}) {
-    if (!member || member.backend !== AGY_BACKEND) return;
-    try {
-      this.mcpBridge?.revokeMemberGrants(store.coordinatorSessionId, member.name);
-    } catch {
-      // ignore
-    }
-    const agySvc = this._getAgyService();
-    if (!agySvc || !member.agyWorkerName) return;
-    try {
-      agySvc.stopWorker?.(store.coordinatorSessionId, member.agyWorkerName);
-    } catch {
-      // ignore
-    }
-    if (removeRegistry) {
-      try {
-        agySvc.registry?.remove?.(store.coordinatorSessionId, member.agyWorkerName);
-      } catch {
-        // ignore（注册表损坏等异常不阻断 kill）
-      }
-    }
-  }
-
-  /**
-   * [done] 结项（P1-2）：对每个 agy 成员同步 abort 本轮信号、吊销 Token、stopWorker，
-   * 并把仍在 working 的外部成员收敛为 stopped。abort 之后释放该成员的控制器，
-   * 以便 swarm 被后续 add 重新打开时成员仍可被唤醒（kill 才是终态）。
-   */
-  _shutdownAgyMembersForDone(store) {
-    for (const member of store.state.members) {
-      if (member.killed || member.backend !== AGY_BACKEND) continue;
-      this._abortMember(member.sessionId, 'swarm marked [done]');
-      this.memberAborts.delete(member.sessionId);
-      this._stopAgyMember(store, member, { removeRegistry: false });
-      if (member.state === 'working') {
-        try {
-          store.updateMemberAgyState(member.sessionId, { agyLive: null });
-          store.updateMemberRuntimeState(member.sessionId, { state: 'stopped', activity: '' });
-        } catch {
-          // 结项收尾记账是尽力而为
-        }
-      }
-    }
-  }
-
-  /**
-   * swarm{action:"model"} 的 agy 分支：仅允许 agy-acp ⇄ agy-acp 同后端切换，
-   * 并重置熔断计数（协调员的「裁决」入口）。
-   */
-  async _switchAgyMemberModel({ store, callerName, callerAgent, targetName, targetRow, targetIsAgy, requestIsAgy, args }) {
-    if (!targetIsAgy && requestIsAgy) {
-      throw new Error(
-        `成员 "${targetRow?.name || targetName}" 是 DSH 原生会话，不能切换到外部 agy 模型（禁止 dsh ⇄ agy-acp 跨后端切换；请 kill 后用 agy/ 模型重新 add）`
-      );
-    }
-    if (targetIsAgy && !requestIsAgy) {
-      throw new Error(
-        `成员 "${targetRow.name}" 是 agy 外部成员，只能切换到 agy/<model>（禁止 agy-acp ⇄ dsh 跨后端切换）`
-      );
-    }
-    const resolvedModel = this._resolveAgyModel(args.model);
-    // 热切同样过权限闸门：别名（agy/<alias>）已在 _resolveAgyModel 归一化。
-    assertSwarmModelAllowed(this.config, {
-      ...resolvedModel,
-      requested: typeof args?.model === 'string' ? args.model.trim() : '',
-    });
-    let modePatch = {};
-    if (args?.agy_mode !== undefined && args.agy_mode !== null && args.agy_mode !== '') {
-      const policy = resolveAgyPolicy({
-        sandboxMode: readStrictSandboxMode(this.ctx, callerAgent),
-        planMode: readCallerPlanMode(this.ctx, callerAgent),
-        requestedMode: args.agy_mode,
-      });
-      modePatch = {
-        agyMode: policy.mode,
-        agyFullAccess: policy.fullAccess,
-        agyAccessMode: policy.accessMode,
-      };
-    }
-    const { member, previousModelDisplay } = store.setMemberModel(callerName, targetName, resolvedModel, {
-      pendingModelSync: false,
-    });
-    store.updateMemberAgyState(member.sessionId, {
-      ...modePatch,
-      activationCount: 0,
-      consecutivePeerWakes: 0,
-      circuitBreakNotified: false,
-    });
-
-    if (member.name !== callerName && member.lastError) {
-      await this._deliverPromptToMember(
-        store,
-        member,
-        `[swarm] 你的运行模型已由 @${callerName} 从 ${previousModelDisplay} 切换为 ${resolvedModel.modelDisplay}，agy 会话历史完整保留，请继续未完成的工作。`,
-        store.coordinatorSessionId,
-        { triggerAuthor: callerName }
-      );
-    }
-
-    return {
-      status: 'switched',
-      name: member.name,
-      backend: AGY_BACKEND,
-      previous_model: previousModelDisplay,
-      model: resolvedModel.modelDisplay,
-      reasoning_effort: resolvedModel.reasoningEffort,
-      agy_mode: member.agyMode,
-      pending_model_sync: false,
-    };
   }
 
   async executeReadBoardTool(args, exec) {
@@ -4499,15 +3046,8 @@ function createSwarmTools(controller) {
         description:
           'Optional model ("provider/model" or model ID) for add or model switch; omit on add to inherit the coordinator current DSH route. ' +
           'Any model configured in this DSH installation can be dispatched unless the Swarm model-dispatch settings forbid it; ' +
-          'call swarm{action:"models"} to see the live catalog, including entries contributed by optional extensions. ' +
+          'call swarm{action:"models"} to see the live catalog. ' +
           'A model disabled by those settings is rejected outright and never silently replaced.',
-      },
-      agy_mode: {
-        type: 'string',
-        enum: ['accept-edits', 'plan', 'default'],
-        description:
-          'Optional session mode for members whose backend is an optional external ACP extension. Defaults to accept-edits under a writable parent; forced to plan when the caller is in Plan mode or a read-only sandbox (explicit accept-edits is then rejected). ' +
-          'Use plan for review-only members and accept-edits for members that must write.',
       },
       workspace: {
         type: 'string',
@@ -4865,8 +3405,7 @@ function mountSwarmRemoteService(ctx, controller) {
       }
 
       /**
-       * 设置页「模型派发权限控制」的数据源：`probeAgy` 仅为前向兼容保留，
-       * 宿主永远以 `probeAgy: false` 查询（零子进程启动）。
+       * 设置页「模型派发权限控制」的数据源：只读取宿主已发现的模型目录，零子进程启动。
        */
       async getSwarmModels(request) {
         parseSwarmModelsRequest(request);
@@ -5115,10 +3654,6 @@ function registerHostEventListeners(ctx, controller) {
     for (const member of store.state.members) {
       if (member.role === 'coordinator' || member.killed) continue;
       controller._abortMember(member.sessionId, 'workspace/session-stop');
-      if (member.backend === AGY_BACKEND) {
-        controller._stopAgyMember(store, member, { removeRegistry: false });
-        continue;
-      }
       const live =
         controller.liveHandles.get(member.sessionId)?.agent || agentsSvc?.get?.(member.sessionId);
       controller._cancelAgent(live, 'workspace/session-stop');
@@ -5143,7 +3678,7 @@ function registerHostEventListeners(ctx, controller) {
 
 /**
  * 设置页保存后的热更新入口：只替换运行期字段，保留 controller 与成员状态，
- * 绝不重建桥 / 中断正在跑的 agy 轮次。
+ * 绝不中断正在执行的成员轮次。
  *
  * 传入的是局部补丁时（例如只改 `allowedModels`），未提到的运行期字段沿用
  * 当前值而不是回落到默认值——否则单独调整白名单会静默清空黑名单。
@@ -5185,7 +3720,7 @@ function apply(ctx, config = {}) {
   mountDedicatedSettings(ctx);
 
   // 契约 0.3：Config 字段全部 .volatile()，设置页保存后由 loader 广播热更新，
-  // 这里把最新值同步进运行中的 controller（不重建桥、不中断 agy 轮次）。
+  // 这里把最新值同步进运行中的 controller（不中断成员轮次）。
   if (typeof ctx?.on === 'function') {
     let lastSnapshot = JSON.stringify(normalizeSwarmConfig(config));
     ctx.on('loader/volatile-update', () => {
@@ -5414,16 +3949,6 @@ module.exports = {
   readAgentDelegationDepth,
   captureDelegatedPolicyOverrides,
   setDshScopeForTests,
-  // 二期：agy-acp 外部队友接入
-  SWARM_MCP_SERVER_NAME,
-  AGY_BACKEND,
-  MCP_STDIO_ENTRY,
-  AGY_AUTO_ARCHIVE_TAG,
-  AGY_CIRCUIT_BREAK_MESSAGE,
-  AGY_EMPTY_TURN_MESSAGE,
-  formatAgyEmptyTurnError,
-  DEFAULT_MAX_CONSECUTIVE_PEER_WAKES,
-  DEFAULT_MAX_AGY_TURNS_PER_MEMBER,
   SWARM_CONFIG_DEFAULTS,
   normalizeSwarmConfig,
   applyVolatileConfig,
@@ -5432,16 +3957,4 @@ module.exports = {
   isSwarmModelAllowed,
   assertSwarmModelAllowed,
   describeModelRuleState,
-  AGY_PHASE_LABELS,
-  describeAgyProgress,
-  extractAgyTurnUsage,
-  mergeAgyUsage,
-  buildAgyBridgeAllowlist,
-  isAgyModelSpec,
-  makeAgyWorkerName,
-  resolveAgyPolicy,
-  readCallerPlanMode,
-  readStrictSandboxMode,
-  clampAgyTurnPolicy,
-  resolveNodeExecutable,
 };

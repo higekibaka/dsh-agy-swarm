@@ -1,13 +1,12 @@
 /**
- * 开源发布版友好度与脱敏回归。
+ * 开源发布版友好度与脱敏回归（纯原生 DSH 多智能体集群）。
  *
- * 这一套只验证「没有安装可选扩展 dsh-agy-acp 的用户」能得到的体验，
- * 以及所有对外文本的脱敏与跨平台路径处理：
- *   1. 未挂载 ACP 时动态隐藏 agy 派发说明；
- *   2. lastError / activity / 桥报错脱敏；
- *   3. nodeExecutable 校验与跨平台 Node 探测；
- *   4. 插件身份与旧表单 id 的兼容读取；
- *   5. 仓库内不留个人路径与私有模型清单。
+ * 这一套只验证原生能力与对外文本的脱敏，覆盖：
+ *   1. 提示词 / 工具 Schema 不含任何已移除外部队友后端的残留；
+ *   2. lastError / activity / 错误回包的脱敏；
+ *   3. 插件身份（包名、0.2.0 版本、无外部后端依赖、旧表单 id 只读兼容）；
+ *   4. 仓库内不留个人路径与私有模型清单；
+ *   5. 模型派发权限（Config / 纯函数 / 路由解析 / 目录 / 协议 / 设置页）。
  */
 
 import test from 'node:test';
@@ -25,34 +24,41 @@ const clientMod = require('../client.js');
 const protocol = require('../src/protocol.js');
 const prompts = require('../src/prompts.js');
 const redaction = require('../src/redaction.js');
-const bridgeMod = require('../src/mcp-bridge-server.js');
+const { BoardStore } = require('../src/board-store.js');
 
 const PLUGIN_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
-test('未挂载 dsh-agy-acp 时不向协调员/成员注入任何 agy 派发说明', () => {
+/** 已删除的外部后端留下的可搜索标记：源码与测试里一律不得出现。 */
+const REMOVED_BACKEND_MARKERS = Object.freeze([
+  ['dsh', 'agy', 'acp'].join('-'),
+  ['mcp', 'bridge', 'server'].join('-'),
+  ['mcp', 'stdio', 'entry'].join('-'),
+  ['agy', 'mode'].join('_'),
+  ['agy', 'Live'].join(''),
+  ['agy', 'Usage'].join(''),
+  ['max', 'Agy'].join(''),
+]);
+
+test('提示词与工具 Schema 不含任何外部队友后端的残留', () => {
   const nativeSkill = prompts.COORDINATOR_SKILL_CONTENT;
-  assert.ok(!nativeSkill.includes('agy/'), '协调员规范不得出现 agy/ 派发写法');
-  assert.ok(!nativeSkill.includes('agy_mode'), '协调员规范不得出现 agy_mode');
-  assert.ok(!nativeSkill.includes('外部 ACP'), '协调员规范不得提到外部 ACP 队友');
+  assert.ok(!nativeSkill.includes(['agy', '/'].join('')), '协调员规范不得出现外部模型路由写法');
+  assert.ok(!nativeSkill.includes(['agy', 'mode'].join('_')), '协调员规范不得出现外部模式参数');
+  assert.ok(!nativeSkill.includes('外部 ACP'), '协调员规范不得提到外部队友');
+  assert.ok(!nativeSkill.includes(['maxConsecutive', 'PeerWakes'].join('')), '不再暴露熔断阈值参数');
+  assert.ok(nativeSkill.includes('100% 实测全绿'), '内循环仍以实测全绿为收口条件');
 
-  const withAcp = prompts.buildCoordinatorSkillContent({ agyAcpAvailable: true });
-  assert.ok(withAcp.includes('agy/') && withAcp.includes('agy_mode'), '挂载后才拼接可选段落');
-  assert.ok(withAcp.startsWith(nativeSkill), '原生规范不变，只在尾部追加');
+  // 协调员规范只有一套：不再按「是否安装扩展」动态拼接
+  assert.equal(prompts.buildCoordinatorSkillContent(), prompts.COORDINATOR_SKILL_CONTENT);
+  assert.equal(prompts.buildCoordinatorSkillInjection.length, 0, '注入入口不再接受可选后端开关');
 
-  const workerOff = prompts.buildWorkerSystemPrompt({ memberName: 'w', coordinatorSessionId: 'c' });
-  assert.ok(!workerOff.includes('agy/'), '未挂载时 Worker 简报不得提 agy');
-  const workerOn = prompts.buildWorkerSystemPrompt({
-    memberName: 'w',
-    coordinatorSessionId: 'c',
-    agyAcpAvailable: true,
-  });
-  assert.ok(workerOn.includes('agy/<model>'), '挂载后才出现外部 ACP 队友条目');
+  const injection = prompts.buildCoordinatorSkillInjection({ sessionId: 's1' });
+  assert.ok(injection.includes('<skill_content name="swarm">'));
+  assert.ok(!injection.includes(['agy', '/'].join('')));
 
-  // 注入外壳同样受开关控制
-  const injectionOff = prompts.buildCoordinatorSkillInjection({ sessionId: 's1' });
-  assert.ok(!injectionOff.includes('agy_mode'));
-  const injectionOn = prompts.buildCoordinatorSkillInjection({ sessionId: 's1', agyAcpAvailable: true });
-  assert.ok(injectionOn.includes('agy_mode'));
+  const worker = prompts.buildWorkerSystemPrompt({ memberName: 'w', coordinatorSessionId: 'c' });
+  assert.ok(!worker.includes(['agy', '/'].join('')), 'Worker 简报不得提外部模型路由');
+  assert.ok(!worker.includes('7b.'), '不再注入 7b 外部队友条目');
+  assert.ok(!worker.includes(['agy', 'Acp', 'Available'].join('')), '不再有可选后端开关参数');
 });
 
 test('redactSensitiveText：凭据、Token、授权头与个人主目录路径一律脱敏并限长', () => {
@@ -60,7 +66,7 @@ test('redactSensitiveText：凭据、Token、授权头与个人主目录路径�
     { input: 'Authorization: Bearer abcdef123456', hidden: 'abcdef123456', mark: '[REDACTED]' },
     { input: 'token=sk-live-0123456789abcdef', hidden: 'sk-live-0123456789abcdef', mark: '[REDACTED]' },
     {
-      input: 'node mcp.js --auth-file ' + ['C:', 'Users', 'someone', 'tok.json'].join(path.sep),
+      input: 'node cli.js --auth-file ' + ['C:', 'Users', 'someone', 'tok.json'].join(path.sep),
       hidden: 'someone',
       mark: '[REDACTED]',
     },
@@ -79,11 +85,7 @@ test('redactSensitiveText：凭据、Token、授权头与个人主目录路径�
   assert.equal(redaction.redactSensitiveText('  plain  '), '  plain  ', '非敏感文本原样保留');
 });
 
-test('桥接错误回包与成员 error/activity 写入点都经过脱敏', () => {
-  const bridgeSource = fs.readFileSync(path.join(PLUGIN_ROOT, 'src/mcp-bridge-server.js'), 'utf8');
-  assert.match(bridgeSource, /redactSensitiveText\(err\?\.message/, '桥错误回包必须脱敏');
-  assert.ok(!/error: err\?\.message \|\| String\(err\),/.test(bridgeSource), '不得保留未脱敏的错误回包');
-
+test('成员 error/activity 写入点都经过脱敏', () => {
   const indexSource = fs.readFileSync(path.join(PLUGIN_ROOT, 'index.js'), 'utf8');
   for (const call of ['redactErrorText(', 'redactActivityText(']) {
     assert.ok(indexSource.includes(call), '缺少脱敏调用：' + call);
@@ -92,89 +94,46 @@ test('桥接错误回包与成员 error/activity 写入点都经过脱敏', () =
   assert.match(indexSource, /activity: redactActivityText\(/, 'activity 写入必须脱敏');
 });
 
-test('nodeExecutable：trim、存在性与非目录校验，无效路径当场报错', async () => {
-  const proto = swarm.SwarmHostController.prototype;
-  const missing = path.join(os.tmpdir(), 'dsh-swarm-missing-node-' + process.pid);
-  await assert.rejects(
-    () => proto._resolveNodeExecutable.call({ config: { nodeExecutable: '  ' + missing + '  ' }, ctx: null }),
-    /nodeExecutable 指向的路径不存在/
-  );
-  await assert.rejects(
-    () => proto._resolveNodeExecutable.call({ config: { nodeExecutable: os.tmpdir() }, ctx: null }),
-    /指向的是目录而非可执行文件/
-  );
-  const trimmed = '  ' + process.execPath + '\t';
-  assert.equal(
-    await proto._resolveNodeExecutable.call({ config: { nodeExecutable: trimmed }, ctx: null }),
-    process.execPath,
-    '合法路径必须先 trim 再返回'
-  );
-  assert.equal(
-    await proto._resolveNodeExecutable.call({ config: { nodeExecutable: '' }, ctx: null }),
-    process.execPath,
-    '留空时回落到纯 node 的 execPath'
-  );
-});
-
-test('resolveNodeExecutable：按 resourcesPath / execPath 现算候选，跨平台零硬编码', async () => {
-  const exe = process.platform === 'win32' ? 'node.exe' : 'node';
-  const installRoot = path.parse(process.cwd()).root + path.join('opt', 'dsh-install');
-  const expected = path.resolve(installRoot, 'resources', 'runtime', 'primary-runtime', 'dependencies', 'node', 'bin', exe);
-  const seen = [];
-  const resolved = await swarm.resolveNodeExecutable({
-    execPath: path.join(installRoot, 'dsh'),
-    resourcesPath: path.join(installRoot, 'resources'),
-    versions: { electron: '33.0.0' },
-    existsSync: (p) => {
-      seen.push(p);
-      return p === expected;
-    },
-  });
-  assert.equal(resolved, expected);
-  assert.ok(seen.every((p) => path.isAbsolute(p)), '候选必须是绝对路径');
-
-  // resolveExecutable 是 Promise：必须 await 生效并按 'node' 查询
-  const fromSubprocess = await swarm.resolveNodeExecutable({
-    execPath: path.join(installRoot, 'dsh'),
-    resourcesPath: path.join(installRoot, 'resources'),
-    versions: { electron: '33.0.0' },
-    existsSync: () => false,
-    subprocess: { resolveExecutable: async (name) => (name === 'node' ? path.join(installRoot, 'node') : '') },
-  });
-  assert.equal(fromSubprocess, path.join(installRoot, 'node'));
-
-  await assert.rejects(
-    () =>
-      swarm.resolveNodeExecutable({
-        execPath: path.join(installRoot, 'dsh'),
-        resourcesPath: path.join(installRoot, 'resources'),
-        versions: { electron: '33.0.0' },
-        existsSync: () => false,
-      }),
-    /纯 Node 可执行文件/
-  );
-});
-
-test('插件身份：dsh-agy-swarm 清单、patch 与设置页命名空间一致，并保留旧表单只读兜底', () => {
+test('插件身份：清单 0.2.0、无外部后端依赖、patch 与设置页命名空间一致', () => {
   assert.equal(protocol.PLUGIN_ID, 'dsh-agy-swarm');
   assert.equal(protocol.SWARM_SETTINGS_ID, 'dsh-agy-swarm');
   assert.equal(protocol.SWARM_SETTINGS_NS, 'settings.dshAgySwarm');
   assert.equal(protocol.SWARM_SETTINGS_ID_LEGACY, 'local-dsh-swarm');
-  assert.equal(protocol.AGY_ACP_PLUGIN_NAME, 'dsh-agy-acp');
   assert.equal(swarm.name, protocol.PLUGIN_ID);
 
   const pkg = JSON.parse(fs.readFileSync(path.join(PLUGIN_ROOT, 'package.json'), 'utf8'));
   assert.equal(pkg.name, 'dsh-agy-swarm');
+  assert.equal(pkg.version, '0.2.0', '版本号必须升级为 0.2.0');
   assert.equal(pkg.private, undefined, '公开发布版不得保留 private');
   assert.equal(pkg.license, 'MIT');
   assert.equal(pkg.author, 'higekibaka');
   assert.match(pkg.repository.url, /dsh-agy-swarm/);
   assert.ok(Array.isArray(pkg.keywords) && pkg.keywords.includes('multi-agent'));
-  assert.equal(pkg.peerDependenciesMeta['dsh-agy-acp'].optional, true, 'ACP 必须声明为可选 peer');
+  assert.ok(!pkg.keywords.includes('acp'), '关键词不得再保留 acp');
+
+  // a) 不再声明任何外部队友后端依赖（peer / optional peer / 任何 dependencies 段）
+  const externalPkg = ['dsh', 'agy', 'acp'].join('-');
+  for (const section of ['dependencies', 'devDependencies', 'optionalDependencies', 'peerDependencies']) {
+    const block = pkg[section];
+    if (!block) continue;
+    assert.equal(block[externalPkg], undefined, section + ' 不得包含 ' + externalPkg);
+  }
+  assert.equal(pkg.peerDependenciesMeta[externalPkg], undefined, 'peerDependenciesMeta 不得包含 ' + externalPkg);
+  const removedExportA = './' + ['mcp', 'bridge', 'server'].join('-');
+  const removedExportB = './' + ['mcp', 'stdio', 'entry'].join('-');
+  assert.equal(pkg.exports[removedExportA], undefined, '不再导出本地 MCP 桥');
+  assert.equal(pkg.exports[removedExportB], undefined, '不再导出 MCP stdio 入口');
   for (const dep of ['@deepseek-ai/cordis', '@deepseek-ai/dsh-tools', 'react']) {
     assert.equal(pkg.peerDependenciesMeta[dep].optional, true, dep + ' must be an optional peer');
   }
   assert.ok(pkg.files.includes('docs') && pkg.files.includes('LICENSE'));
+
+  // 测试脚本只跑两个原生套件
+  assert.equal(pkg.scripts['test:acp-integration'], undefined, '不再保留 ACP 集成脚本');
+  assert.match(pkg.scripts.test, /test\/swarm\.test\.mjs test\/swarm-open-source\.test\.mjs/);
+  assert.ok(!pkg.scripts.check.includes(['mcp', 'bridge', 'server'].join('-')), 'check 脚本不得再检查已删文件');
+  assert.ok(!pkg.scripts.check.includes(['mcp', 'stdio', 'entry'].join('-')));
+  assert.ok(!pkg.scripts.check.includes('.tmp-tools'));
 
   const patch = fs.readFileSync(path.join(PLUGIN_ROOT, 'cordis.patch.yml'), 'utf8');
   assert.match(patch, /id: dsh-agy-swarm/);
@@ -191,19 +150,31 @@ test('插件身份：dsh-agy-swarm 清单、patch 与设置页命名空间一致
   assert.equal(swarm.__testOnlyPluginId || protocol.PLUGIN_ID, 'dsh-agy-swarm');
 });
 
-test('createSwarmTools：工具参数 schema 通用，不含 agy 路由示例或外部 CLI 名词', () => {
+test('createSwarmTools：工具 Schema 通用，且不再含外部模式字段（b）', () => {
   const controller = Object.create(swarm.SwarmHostController.prototype);
   controller.config = {};
   controller.ctx = null;
   const built = swarm.createSwarmTools(controller);
   const list = Array.isArray(built) ? built : built && typeof built === 'object' ? Object.values(built) : [];
   assert.ok(list.length > 0, '工具工厂必须返回工具定义');
-  const serialized = JSON.stringify(list);
-  assert.ok(!serialized.includes('agy/'), '工具 schema 不得出现 agy/<model> 路由示例');
-  assert.ok(!serialized.includes('Antigravity'), '工具 schema 不得提外部 CLI');
-  assert.ok(!serialized.includes('dsh-agy-acp'), 'schema 不应提具体扩展包名');
+
   const swarmTool = list.find((t) => (t && t.name === 'swarm') || (t && t.tool && t.tool.name === 'swarm'));
   assert.ok(swarmTool, '必须构建出 swarm 工具');
+  const properties = swarmTool.parameters?.properties || {};
+  assert.equal(
+    Object.prototype.hasOwnProperty.call(properties, ['agy', 'mode'].join('_')),
+    false,
+    'swarm 参数表不得再有外部模式字段'
+  );
+
+  const serialized = JSON.stringify(list);
+  for (const marker of REMOVED_BACKEND_MARKERS) {
+    assert.ok(!serialized.includes(marker), '工具 Schema 不得出现已移除标记：' + marker);
+  }
+  assert.ok(!serialized.includes(['agy', '/'].join('')), '工具 schema 不得出现外部模型路由示例');
+  assert.ok(!serialized.includes('Antigravity'), '工具 schema 不得提外部 CLI');
+  assert.ok(!serialized.includes('optional extensions'), 'model 说明不再暗示可选扩展条目');
+
   const toolText = JSON.stringify(swarmTool);
   assert.ok(toolText.includes('configured in this DSH installation'), 'model 说明必须保持 DSH 通用路由表述');
   assert.ok(toolText.includes('"model"'), 'model 参数必须存在');
@@ -217,16 +188,16 @@ test('仓库文本不留个人路径、私有模型清单与兄弟目录引用�
     ['DeepSeek', 'Harness'].join(''),
     ['parkour', '3d'].join(''),
     '@' + 'local' + '/' + 'dsh-swarm',
-    '@' + 'local' + '/' + 'dsh-agy-acp',
+    '@' + 'local' + '/' + ['dsh', 'agy', 'acp'].join('-'),
     'deepseek' + '-account',
     'openai' + '-codex-fast',
     'google' + '-antigravity',
     'google' + '-vertex-argon',
-    'agy/' + 'argon',
-    'agy/' + 'sonnet',
+    ['agy', 'argon'].join('/'),
+    ['agy', 'sonnet'].join('/'),
     'gpt-' + 'oss',
     'deepseek' + '-v4-pro',
-    ['..', '..', 'dsh-agy-acp'].join('/'),
+    ['..', '..', ['dsh', 'agy', 'acp'].join('-')].join('/'),
   ];
   // 源码里同一条路径可能被写成单反斜杠、双反斜杠（源码转义表示）或正斜杠，必须全部覆盖，
   // 否则只扫渲染后的形态会得到「假清零」。
@@ -241,14 +212,14 @@ test('仓库文本不留个人路径、私有模型清单与兄弟目录引用�
   const files = [];
   const walk = (dir) => {
     for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
-      if (entry.name === 'node_modules' || entry.name === '.git' || entry.name === '.tmp') continue;
+      if (entry.name === 'node_modules' || entry.name === '.git' || entry.name === '.tmp' || entry.name === '.tmp-tools') continue;
       const full = path.join(dir, entry.name);
       if (entry.isDirectory()) walk(full);
       else if (/\.(js|cjs|mjs|json|jsonl|md|yml|yaml|txt|svg)$/.test(entry.name)) files.push(full);
     }
   };
   walk(PLUGIN_ROOT);
-  assert.ok(files.length >= 20, '必须递归扫到全部源码、测试与文档，实际 ' + files.length + ' 个文件');
+  assert.ok(files.length >= 12, '必须递归扫到全部源码、测试与文档，实际 ' + files.length + ' 个文件');
   const offenders = [];
   for (const full of files) {
     const text = fs.readFileSync(full, 'utf8');
@@ -264,7 +235,6 @@ test('仓库文本不留个人路径、私有模型清单与兄弟目录引用�
 });
 
 test('存储层与协议层兜底脱敏：任何写入通道都不会把凭据落盘或推流', () => {
-  const { BoardStore } = require('../src/board-store.js');
   const baseDir = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-swarm-redact-'));
   try {
     const store = new BoardStore('coord-redact', { baseDir });
@@ -279,14 +249,7 @@ test('存储层与协议层兜底脱敏：任何写入通道都不会把凭据�
     assert.ok(String(member.lastError).includes('[REDACTED]'));
     assert.ok(!String(member.activity).includes('someone'), 'activity 不得保留个人主目录');
 
-    // 协议层：agyLive / 成员快照的 activity 也要干净
-    const live = protocol.normalizeAgyLive({
-      runId: 'r1',
-      phase: 'prompt',
-      pid: 1,
-      activity: 'token=sk-live-abcdefghijklmnop',
-    });
-    assert.ok(!live.activity.includes('sk-live'), 'agyLive.activity 必须脱敏');
+    // 协议层：成员快照的 activity 也要干净
     const snap = protocol.normalizeMemberSnapshot({
       name: 'redactor',
       state: 'working',
@@ -311,12 +274,87 @@ test('存储层与协议层兜底脱敏：任何写入通道都不会把凭据�
   }
 });
 
+test('旧版落盘 JSON 含已移除后端字段时不崩、不改写、归一化为原生成员', () => {
+  const baseDir = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-swarm-legacy-'));
+  try {
+    const coordId = 'coord-legacy';
+    const store = new BoardStore(coordId, { baseDir });
+    store.ensureCoordinator({ provider: 'vendor', model: 'model-a' });
+    store.registerMember({ name: 'helper', sessionId: 'sess-helper' });
+    // 释放写者锁，避免下面的重新打开被「并发双写者」保护拒绝
+    store.releaseWriterLock();
+
+    // 旧字段名在测试里也用拼接方式构造：仓库文本因此不含已移除概念的字面量。
+    const legacyField = {
+      backend: 'backend',
+      session: ['agy', 'Session', 'Id'].join(''),
+      worker: ['agy', 'Worker', 'Name'].join(''),
+      mode: ['agy', 'Mode'].join(''),
+      fullAccess: ['agy', 'FullAccess'].join(''),
+      accessMode: ['agy', 'AccessMode'].join(''),
+      live: ['agy', 'Live'].join(''),
+      usage: ['agy', 'Usage'].join(''),
+    };
+    const legacyCounterField = {
+      epoch: 'activationEpoch',
+      count: 'activationCount',
+      peerWakes: 'consecutivePeerWakes',
+      circuit: 'circuitBreakNotified',
+    };
+
+    // 手工写入一份 0.1.x 形态的 state.json：带外部后端标记与若干遗留字段
+    const stateFile = path.join(baseDir, coordId, 'state.json');
+    const raw = JSON.parse(fs.readFileSync(stateFile, 'utf8'));
+    Object.assign(raw.members[1], {
+      [legacyField.backend]: ['agy', 'acp'].join('-'),
+      [legacyField.session]: 'legacy-session',
+      [legacyField.worker]: 'legacy-worker',
+      [legacyField.mode]: 'plan',
+      [legacyField.fullAccess]: false,
+      [legacyField.accessMode]: 'read-only',
+      [legacyField.live]: { runId: 'r1', phase: 'prompt', pid: 42, activity: 'working' },
+      [legacyField.usage]: {
+        turns: 3,
+        totalInput: 100,
+        cacheRead: 10,
+        totalOutput: 20,
+        thinking: 0,
+        cacheHitRate: 0.1,
+      },
+      [legacyCounterField.epoch]: 4,
+      [legacyCounterField.count]: 5,
+      [legacyCounterField.peerWakes]: 2,
+      [legacyCounterField.circuit]: true,
+    });
+    fs.writeFileSync(stateFile, JSON.stringify(raw, null, 2));
+
+    const reopened = new BoardStore(coordId, { baseDir });
+    const member = reopened.getMember('helper');
+    assert.ok(member, '旧成员必须仍可读取');
+    assert.equal(member.name, 'helper');
+    for (const key of [...Object.values(legacyField), ...Object.values(legacyCounterField)]) {
+      assert.equal(Object.prototype.hasOwnProperty.call(member, key), false, '已移除字段必须被丢弃：' + key);
+    }
+
+    // 快照推流同样不含这些字段
+    const snapshot = reopened.toSnapshot();
+    const snapMember = snapshot.members.find((m) => m.name === 'helper');
+    assert.ok(snapMember);
+    assert.equal(Object.prototype.hasOwnProperty.call(snapMember, legacyField.backend), false);
+    assert.equal(Object.prototype.hasOwnProperty.call(snapMember, legacyField.live), false);
+
+    // 反序列化 + 再落盘都不抛错
+    assert.doesNotThrow(() => reopened.updateMemberRuntimeState('sess-helper', { state: 'waiting' }));
+  } finally {
+    fs.rmSync(baseDir, { recursive: true, force: true });
+  }
+});
 
 /* ------------------------------------------------------------------ */
 /* 可视化模型派发权限（allowedModels / blockedModels）                    */
 /* ------------------------------------------------------------------ */
 
-/** 每个用例独立的临时目录 + 最小 Host ctx（llm 目录 + 可选 agy 替身）。 */
+/** 每个用例独立的临时目录 + 最小 Host ctx（只暴露原生 llm 模型目录）。 */
 function createGateHarness(pluginConfig = {}) {
   const baseDir = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-swarm-gate-'));
   const ctx = {
@@ -334,30 +372,6 @@ function createGateHarness(pluginConfig = {}) {
   };
   const controller = new swarm.SwarmHostController(ctx, { baseDir, ...pluginConfig });
   return { controller, ctx, baseDir };
-}
-
-/** 带「别名 → 规范名」的 agy 替身：只验证归一化链路，不含任何真实模型名。 */
-const ALIAS_TO_CANONICAL = Object.freeze({
-  aliased: 'stub-canonical-a',
-  sibling: 'stub-canonical-b',
-});
-
-function createAliasAgyService() {
-  return {
-    config: {},
-    normalizeModelSpec(raw) {
-      const clean = String(raw ?? '').trim();
-      if (ALIAS_TO_CANONICAL[clean]) return { model: ALIAS_TO_CANONICAL[clean], effort: '' };
-      if (Object.values(ALIAS_TO_CANONICAL).includes(clean)) return { model: clean, effort: '' };
-      throw new Error('未知模型 "' + clean + '"');
-    },
-    peekModels() {
-      return {
-        models: Object.values(ALIAS_TO_CANONICAL).map((value) => ({ value, name: value })),
-        efforts: ['low', 'high'],
-      };
-    },
-  };
 }
 
 function createServiceCtx() {
@@ -390,7 +404,7 @@ async function cleanupHarness(harness) {
   fs.rmSync(harness.baseDir, { recursive: true, force: true });
 }
 
-test('Config：allowedModels / blockedModels 默认空数组、强校验与 volatile 热更新', () => {
+test('Config：allowedModels / blockedModels 默认空数组、强校验与 volatile 热更新', async () => {
   const standard = swarm.Config['~standard'];
   const readVal = (value) => (value && typeof value.get === 'function' ? value.get() : value);
 
@@ -403,6 +417,13 @@ test('Config：allowedModels / blockedModels 默认空数组、强校验与 vola
   assert.deepEqual(readVal(empty.value.allowedModels), []);
   assert.deepEqual(readVal(empty.value.blockedModels), []);
   assert.equal(swarm.isSwarmModelAllowed(empty.value, 'any/model'), true, '默认必须不拦任何模型');
+
+  // d) Config 只剩模型派发权限三项
+  assert.deepEqual(
+    Object.keys(swarm.SWARM_CONFIG_DEFAULTS).sort(),
+    ['allowedModels', 'blockedModels', 'strictAllowlist'],
+    'Config 只管理模型派发权限'
+  );
 
   // 合法数组：trim + 大小写不敏感去重（保留首次写法）
   const withRules = standard.validate({
@@ -462,7 +483,7 @@ test('Config：allowedModels / blockedModels 默认空数组、强校验与 vola
     assert.equal(swarm.isSwarmModelAllowed(controller.config, 'vendor/model-b'), false);
     assert.equal(swarm.isSwarmModelAllowed(controller.config, 'vendor/model-a'), true);
   } finally {
-    cleanupHarness(harness);
+    await cleanupHarness(harness);
   }
 });
 
@@ -581,68 +602,138 @@ test('resolveRequestedModel：显式模型、继承协调员默认路由、白�
   }
 });
 
-test('agy/<alias> 归一化后仍被拦住；swarm{action:"model"} 的 agy 分支同样过闸门', async () => {
-  assert.ok(
-    ['agy/', 'aliased'].join('').includes('agy/'),
-    '别名必须带 agy/ 前缀才走外部后端'
-  );
-  const harness = createGateHarness({
-    blockedModels: ['agy/stub-canonical-a'],
-    agyService: createAliasAgyService(),
+/** provider 判定专用 harness：可以精确控制 listProviders / listModels 的行为。 */
+function createProviderHarness({ providers = ['native'], modelsByProvider = {}, ...pluginConfig } = {}) {
+  const baseDir = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-swarm-provider-'));
+  const ctx = {
+    llm: {
+      async listProviders() {
+        return providers;
+      },
+      async listModels(providerId) {
+        const entry = modelsByProvider[providerId];
+        if (typeof entry === 'function') return entry();
+        return Array.isArray(entry) ? entry : [];
+      },
+    },
+    get(name) {
+      return this[name];
+    },
+  };
+  return { controller: new swarm.SwarmHostController(ctx, { baseDir, ...pluginConfig }), baseDir, ctx };
+}
+
+test('c) provider 判定以 llm.listProviders() 为准：已注册 provider 的未列模型放行，未注册 provider 稳定拒绝', async () => {
+  const removedRoute = ['agy', 'carbon'].join('/');
+
+  // (1) listModels 返回空数组：provider 已注册 → 其模型照常通过
+  const emptyCatalog = createProviderHarness({ providers: ['native', 'custom'], modelsByProvider: { custom: [] } });
+  try {
+    const resolved = await emptyCatalog.controller.resolveRequestedModel('custom/unlisted');
+    assert.equal(resolved.modelDisplay, 'custom/unlisted', '已注册 provider 即使没有模型条目也必须可用');
+  } finally {
+    await cleanupHarness(emptyCatalog);
+  }
+
+  // (2) listModels 抛错：同样不得误杀
+  const throwingCatalog = createProviderHarness({
+    providers: ['native', 'custom'],
+    modelsByProvider: {
+      custom: () => {
+        throw new Error('catalog exploded');
+      },
+    },
+  });
+  try {
+    const resolved = await throwingCatalog.controller.resolveRequestedModel('custom/unlisted');
+    assert.equal(resolved.modelDisplay, 'custom/unlisted', 'listModels 抛错不得让已注册 provider 失效');
+  } finally {
+    await cleanupHarness(throwingCatalog);
+  }
+
+  // (3) 已列模型被派发权限过滤掉：provider 依旧可用
+  const filteredCatalog = createProviderHarness({
+    providers: ['native', 'custom'],
+    modelsByProvider: { custom: [{ id: 'model-x', name: 'X' }] },
+    blockedModels: ['custom/model-x'],
+  });
+  try {
+    assert.deepEqual(await filteredCatalog.controller.listAvailableModels(), [], '该 provider 的目录被完全过滤');
+    const resolved = await filteredCatalog.controller.resolveRequestedModel('custom/unlisted');
+    assert.equal(resolved.modelDisplay, 'custom/unlisted', '条目被过滤不等于 provider 未注册');
+  } finally {
+    await cleanupHarness(filteredCatalog);
+  }
+
+  // (4) 未注册 provider：即使模型目录整体为空也必须稳定拒绝
+  const unknownProvider = createProviderHarness({ providers: ['native'], modelsByProvider: {} });
+  try {
+    assert.deepEqual(await unknownProvider.controller.listAvailableModels(), [], '目录整体为空');
+    await assert.rejects(
+      () => unknownProvider.controller.resolveRequestedModel(removedRoute),
+      (err) => /未配置 provider/.test(err.message) && err.message.includes('agy'),
+      '已移除的后端 provider 必须被稳定拒绝（空目录下也不漏网）'
+    );
+    await assert.rejects(
+      () => unknownProvider.controller.resolveRequestedModel('no-such-provider/model-x'),
+      /未配置 provider/
+    );
+    const ok = await unknownProvider.controller.resolveRequestedModel('native/anything');
+    assert.equal(ok.modelDisplay, 'native/anything', '已注册 provider 的未列模型照常通过');
+  } finally {
+    await cleanupHarness(unknownProvider);
+  }
+});
+
+test('宿主无 llm.listProviders 时跳过 provider 校验：宽松透传，绝不误伤离线 mock', async () => {
+  const baseDir = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-swarm-nollm-'));
+  const ctx = { get() { return undefined; } };
+  const controller = new swarm.SwarmHostController(ctx, { baseDir });
+  try {
+    assert.equal(await controller._listRegisteredProviderIds(), null, '无权威名单时返回 null');
+    const resolved = await controller.resolveRequestedModel('whatever/model');
+    assert.equal(resolved.modelDisplay, 'whatever/model', '没有 provider 名单时按已有逻辑透传');
+  } finally {
+    await cleanupHarness({ controller, baseDir });
+  }
+});
+
+test('白名单下传裸模型名与显示名同样放行（判定发生在解析之后）', async () => {
+  const harness = createProviderHarness({
+    providers: ['native'],
+    modelsByProvider: { native: [{ id: 'ok', name: 'Friendly' }] },
+    allowedModels: ['native/ok'],
   });
   const { controller } = harness;
   try {
-    // 别名 aliased 归一化到 agy/stub-canonical-a → 命中黑名单
-    await assert.rejects(
-      () => controller.resolveRequestedModel(['agy', 'aliased'].join('/')),
-      (err) => /禁用规则/.test(err.message) && /agy\/stub-canonical-a/.test(err.message),
-      '别名必须按归一化后的规范名判定'
-    );
-    const sibling = await controller.resolveRequestedModel(['agy', 'sibling'].join('/'));
-    assert.equal(sibling.modelDisplay, 'agy/stub-canonical-b');
-
-    // 白名单只放行规范名，别名同样按规范名收口
-    const whitelist = createGateHarness({
-      allowedModels: ['agy/stub-canonical-a'],
-      agyService: createAliasAgyService(),
-    });
-    try {
-      await assert.rejects(
-        () => whitelist.controller.resolveRequestedModel(['agy', 'sibling'].join('/')),
-        /白名单/
-      );
-      const ok = await whitelist.controller.resolveRequestedModel(['agy', 'aliased'].join('/'));
-      assert.equal(ok.modelDisplay, 'agy/stub-canonical-a');
-    } finally {
-      await cleanupHarness(whitelist);
+    for (const spec of ['native/ok', 'ok', 'Friendly']) {
+      const resolved = await controller.resolveRequestedModel(spec);
+      assert.equal(resolved.provider, 'native', '裸名/显示名必须解析到目标 provider：' + spec);
+      assert.equal(resolved.model, 'ok');
+      assert.equal(resolved.modelDisplay, 'native/ok');
     }
 
-    // swarm{action:"model"} 的 agy 分支：绝不写盘、绝不改状态
-    const store = {
-      assertPermission() {},
-      getMember(name) {
-        return { name, backend: 'agy-acp', killed: false };
-      },
-      setMemberModel() {
-        throw new Error('被禁模型绝不允许落盘');
-      },
-      updateMemberAgyState() {
-        throw new Error('被禁模型绝不允许改动成员状态');
-      },
-    };
+    // 解析后的完整闸门仍在：白名单外模型一样被拦
+    await assert.rejects(() => controller.resolveRequestedModel('native/other'), /白名单/);
+    // 解析后的完整闸门仍在：严格模式空名单同样拒绝
+    assert.ok(swarm.applyVolatileConfig(controller, { strictAllowlist: true, allowedModels: [] }));
+    await assert.rejects(() => controller.resolveRequestedModel('native/ok'), /允许列表为空/);
+  } finally {
+    await cleanupHarness(harness);
+  }
+});
+
+test('显式黑名单在解析前早退：未注册 provider 的被禁写法报黑名单而不是未配置 provider', async () => {
+  const harness = createProviderHarness({
+    providers: ['native'],
+    blockedModels: [['agy', 'carbon'].join('/')],
+  });
+  const { controller } = harness;
+  try {
     await assert.rejects(
-      () =>
-        controller._switchAgyMemberModel({
-          store,
-          callerName: 'coordinator',
-          callerAgent: { id: 'coord' },
-          targetName: 'helper',
-          targetRow: store.getMember('helper'),
-          targetIsAgy: true,
-          requestIsAgy: true,
-          args: { model: ['agy', 'aliased'].join('/') },
-        }),
-      /禁用规则/
+      () => controller.resolveRequestedModel(['agy', 'carbon'].join('/')),
+      (err) => /禁用规则/.test(err.message) && /模型派发权限控制/.test(err.message),
+      '显式禁用必须优先于 provider 未注册报错'
     );
   } finally {
     await cleanupHarness(harness);
@@ -650,43 +741,30 @@ test('agy/<alias> 归一化后仍被拦住；swarm{action:"model"} 的 agy 分�
 });
 
 test('listAvailableModels：默认过滤被禁模型，includeBlocked 保留全量并标记；models 工具同步收口', async () => {
-  const harness = createGateHarness({
-    blockedModels: ['vendor/model-b'],
-    agyService: createAliasAgyService(),
-  });
+  const harness = createGateHarness({ blockedModels: ['vendor/model-b'] });
   const { controller } = harness;
   try {
     const visible = await controller.listAvailableModels();
     assert.deepEqual(
       visible.map((m) => m.key),
-      ['vendor/model-a', 'agy/stub-canonical-a', 'agy/stub-canonical-b'],
-      '默认清单必须滤掉被禁条目（agy 条目一并参与判定）'
+      ['vendor/model-a'],
+      '默认清单必须滤掉被禁条目'
     );
     assert.equal(visible[0].allowed, undefined, '过滤后的条目不得混入设置页专用标记');
 
     const everything = await controller.listAvailableModels({ includeBlocked: true });
-    assert.deepEqual(everything.map((m) => m.key).sort(), [
-      'agy/stub-canonical-a',
-      'agy/stub-canonical-b',
-      'vendor/model-a',
-      'vendor/model-b',
-    ]);
+    assert.deepEqual(everything.map((m) => m.key).sort(), ['vendor/model-a', 'vendor/model-b']);
     const blockedRow = everything.find((m) => m.key === 'vendor/model-b');
     assert.equal(blockedRow.blocked, true);
     assert.equal(blockedRow.allowed, false);
     const allowedRow = everything.find((m) => m.key === 'vendor/model-a');
     assert.equal(allowedRow.blocked, false);
     assert.equal(allowedRow.allowed, true);
-    assert.equal(
-      everything.find((m) => m.key === 'agy/stub-canonical-a').backend,
-      'agy-acp',
-      'agy 条目必须保留 backend'
-    );
 
     // 模型工具（swarm{action:"models"}）永远看不到被禁条目
     const listed = await controller.executeSwarmTool({ action: 'models' }, {});
     assert.ok(!listed.models.some((m) => m.key === 'vendor/model-b'));
-    assert.equal(listed.total_configured, 3);
+    assert.equal(listed.total_configured, 1, 'total_configured 只统计当前允许派发的条目');
 
     // 白名单模式下同样收口（局部补丁不得清空未提到的黑名单字段）
     assert.ok(swarm.applyVolatileConfig(controller, { allowedModels: ['vendor/model-b'], blockedModels: [] }));
@@ -730,13 +808,17 @@ test('listAvailableModels：默认过滤被禁模型，includeBlocked 保留全�
 });
 
 test('getSwarmModels：Typert 协议请求/结果校验，Host 服务零子进程返回全量目录', async () => {
-  // 协议层
-  assert.deepEqual(protocol.parseSwarmModelsRequest(undefined), { probeAgy: false });
-  assert.deepEqual(protocol.parseSwarmModelsRequest({}), { probeAgy: false });
-  assert.deepEqual(protocol.parseSwarmModelsRequest({ probeAgy: true }), { probeAgy: true });
-  assert.throws(() => protocol.parseSwarmModelsRequest({ sessionId: 'x' }), TypeError);
-  assert.throws(() => protocol.parseSwarmModelsRequest({ probeAgy: 'yes' }), TypeError);
-  assert.throws(() => protocol.parseSwarmModelsRequest([]), TypeError);
+  // 协议层：任意 plain object 归一化为 {}，只有非 plain object 才是协议违约。
+  // 旧版 Web 客户端缓存会发送 { probeAgy: false }，升级后必须照常工作。
+  assert.deepEqual(protocol.parseSwarmModelsRequest(undefined), {});
+  assert.deepEqual(protocol.parseSwarmModelsRequest(null), {});
+  assert.deepEqual(protocol.parseSwarmModelsRequest({}), {});
+  assert.deepEqual(protocol.parseSwarmModelsRequest({ sessionId: 'x' }), {}, '未知键一律忽略');
+  assert.deepEqual(protocol.parseSwarmModelsRequest({ probeAgy: false }), {}, '旧客户端字段必须被忽略');
+  assert.deepEqual(protocol.parseSwarmModelsRequest({ probeAgy: true }), {}, '旧客户端字段必须被忽略');
+  for (const bad of [[], ['probeAgy'], 'probeAgy', 42, true]) {
+    assert.throws(() => protocol.parseSwarmModelsRequest(bad), TypeError, '非 plain object 必须被拒：' + JSON.stringify(bad));
+  }
 
   const rawResult = {
     models: [
@@ -752,12 +834,15 @@ test('getSwarmModels：Typert 协议请求/结果校验，Host 服务零子进�
   assert.throws(() => protocol.parseSwarmModelsResult({ models: 'nope' }), TypeError);
 
   // Host ↔ Client 协议对称
-  assert.deepEqual(clientMod.parseSwarmModelsRequest({ probeAgy: true }), { probeAgy: true });
-  assert.throws(() => clientMod.parseSwarmModelsRequest({ sessionId: 'x' }), /unexpected key/);
+  assert.deepEqual(clientMod.parseSwarmModelsRequest({}), {});
+  assert.deepEqual(clientMod.parseSwarmModelsRequest({ probeAgy: false }), {}, 'Client 侧同样忽略旧字段');
+  assert.deepEqual(clientMod.parseSwarmModelsRequest({ sessionId: 'x' }), {});
+  assert.throws(() => clientMod.parseSwarmModelsRequest([]), /expected a JSON object/);
+  assert.throws(() => clientMod.parseSwarmModelsRequest('x'), /expected a JSON object/);
   assert.deepEqual(clientMod.parseSwarmModelsResult(rawResult), parsed);
   const modelsDescriptor = clientMod.SWARM_REMOTE.descriptors.find((d) => d.method === 'getSwarmModels');
   assert.ok(modelsDescriptor, 'Client 侧必须有 getSwarmModels 描述符');
-  assert.deepEqual(modelsDescriptor.parameters[0].codec.schema.parse({}), { probeAgy: false });
+  assert.deepEqual(modelsDescriptor.parameters[0].codec.schema.parse({}), {});
   assert.ok(modelsDescriptor.result.schema.parse(rawResult));
   assert.throws(() => modelsDescriptor.result.schema.parse({ models: 1 }));
 
@@ -772,7 +857,12 @@ test('getSwarmModels：Typert 协议请求/结果校验，Host 服务零子进�
     assert.deepEqual(result.models.map((m) => m.key).sort(), ['vendor/model-a', 'vendor/model-b']);
     assert.equal(result.models.find((m) => m.key === 'vendor/model-b').blocked, true);
     assert.equal(result.models.find((m) => m.key === 'vendor/model-b').allowed, false);
-    await assert.rejects(() => service.getSwarmModels({ sessionId: 'x' }), TypeError);
+    assert.ok(result.models.every((m) => m.backend === 'dsh'), '所有条目都是原生 DSH 路由');
+    // 旧字段不再让服务报错：请求体被归一化为 {}，目录照常返回
+    const legacyRequest = await service.getSwarmModels({ probeAgy: false, sessionId: 'x' });
+    assert.deepEqual(legacyRequest.models.map((m) => m.key).sort(), ['vendor/model-a', 'vendor/model-b']);
+    // 非 plain object 仍然是协议违约
+    await assert.rejects(() => service.getSwarmModels([]), TypeError);
 
     const marker = Object.getOwnPropertyDescriptor(
       Object.getPrototypeOf(service),
@@ -794,10 +884,10 @@ test('getSwarmModels：Typert 协议请求/结果校验，Host 服务零子进�
 /**
  * 设置页 harness。
  *
- * `useState` 做成真正的「跨渲染持久」：每轮 render 前重置 hook 游标，
+ * useState 做成真正的「跨渲染持久」：每轮 render 前重置 hook 游标，
  * 这样开关草稿、notice 这类状态与真实 React 行为一致（写入失败必须能观察到
  * error 提示，且开关不得停留在未保存的位置）。
- * `failKeys` 里的键会让 `form.set` 返回 false 且**不更新快照**，用来模拟保存失败。
+ * failKeys 里的键会让 form.set 返回 false 且**不更新快照**，用来模拟保存失败。
  */
 function createPermissionsSectionHarness({ initialValue = {}, models = null, failKeys = [] } = {}) {
   const hookValues = [];
@@ -827,10 +917,6 @@ function createPermissionsSectionHarness({ initialValue = {}, models = null, fai
     status: 'ready',
     writable: true,
     value: {
-      maxConsecutivePeerWakes: 0,
-      maxAgyTurnsPerMember: 0,
-      maxAgyPostsPerTurn: 8,
-      nodeExecutable: '',
       strictAllowlist: false,
       allowedModels: [],
       blockedModels: [],
@@ -937,7 +1023,7 @@ test('设置页：开启严格白名单写入 allowedModels，切换回来清空
   assert.deepEqual(h.writes.at(-1), ['allowedModels', []]);
 });
 
-test('设置页：手动模型规则可加入禁用/允许列表，恢复默认清空两个数组', async () => {
+test('设置页：手动模型规则可加入禁用/允许列表，恢复默认只写模型派发权限三项（d）', async () => {
   const h = createPermissionsSectionHarness({ models: [] });
   const tree = h.render();
   const input = flattenTree(tree).find((n) => n.props && n.props['data-field'] === 'manualModelRule');
@@ -953,22 +1039,50 @@ test('设置页：手动模型规则可加入禁用/允许列表，恢复默认�
   await nodeByAction(second, 'add-allowed-rule').props.onClick();
   assert.deepEqual(h.writes.at(-1), ['allowedModels', ['vendor/model-y']]);
 
-  // 恢复默认：两个列表一起清空
+  // 恢复默认：只覆盖模型派发权限三项
   h.writes.length = 0;
   await nodeByAction(h.render(), 'reset-defaults').props.onClick();
   const written = Object.fromEntries(h.writes);
   assert.deepEqual(written.allowedModels, []);
   assert.deepEqual(written.blockedModels, []);
-  assert.deepEqual(Object.keys(written).sort(), [
-    'allowedModels',
-    'blockedModels',
-    'maxAgyPostsPerTurn',
-    'maxAgyTurnsPerMember',
-    'maxConsecutivePeerWakes',
-    'nodeExecutable',
-    'strictAllowlist',
-  ]);
+  assert.deepEqual(
+    Object.keys(written).sort(),
+    ['allowedModels', 'blockedModels', 'strictAllowlist'],
+    '恢复默认只写这三项（不残留已移除的字段）'
+  );
   assert.equal(written.strictAllowlist, false, '恢复默认必须同时关掉严格白名单');
+  assert.deepEqual(Object.keys(clientMod.SETTINGS_DEFAULTS).sort(), ['allowedModels', 'blockedModels', 'strictAllowlist']);
+});
+
+test('设置页：不再渲染任何外部后端配置项（d）', () => {
+  const h = createPermissionsSectionHarness({ models: [...RULE_MODELS] });
+  const tree = h.render();
+  const nodes = flattenTree(tree);
+
+  // 只剩模型派发权限卡片
+  const cards = nodes.filter((n) => n.props && n.props['data-card']);
+  assert.deepEqual(cards.map((c) => c.props['data-card']), ['models']);
+
+  // 没有外部后端相关的字段行、输入框或提示
+  const removedSettingFields = [
+    'nodeExecutable',
+    ['maxConsecutive', 'PeerWakes'].join(''),
+    ['max', 'Agy', 'Turns', 'Per', 'Member'].join(''),
+    ['max', 'Agy', 'Posts', 'Per', 'Turn'].join(''),
+  ];
+  for (const field of removedSettingFields) {
+    assert.ok(!nodes.some((n) => n.props && n.props['data-field'] === field), '不得再渲染字段 ' + field);
+  }
+  assert.ok(!nodes.some((n) => n.props && n.props['data-role'] === 'agy-overlap-hint'));
+  assert.ok(!nodes.some((n) => n.props && n.props['data-action'] === 'save-nodeExecutable'));
+  assert.ok(nodeByAction(tree, 'toggle-whitelist'), '严格白名单开关仍在');
+  assert.ok(nodeByAction(tree, 'reset-defaults'), '恢复默认仍在');
+
+  // 文案里不再有已移除的参数名
+  const serialized = JSON.stringify(tree);
+  assert.ok(!serialized.includes(['maxConsecutive', 'PeerWakes'].join('')), '文案不得再提熔断阈值');
+  assert.ok(!serialized.includes(['max', 'Agy'].join('')), '文案不得再提外部轮次上限');
+  assert.ok(!serialized.includes('nodeExecutable'), '文案不得再提外部进程可执行文件');
 });
 
 test('严格白名单：取消最后一个勾选后 strictAllowlist 保持 true，任意模型一律拒绝', async () => {
@@ -1122,7 +1236,6 @@ test('严格白名单：legacy 仅靠 allowedModels 激活时，清空最后一�
   assert.equal(swarm.isSwarmModelAllowed(h.getValue(), 'other/model-x'), false);
 });
 
-
 test('模型派发权限：默认配置、工具 Schema 与提示词零私人模型硬编码', () => {
   assert.deepEqual([...swarm.SWARM_CONFIG_DEFAULTS.allowedModels], []);
   assert.deepEqual([...swarm.SWARM_CONFIG_DEFAULTS.blockedModels], []);
@@ -1133,7 +1246,7 @@ test('模型派发权限：默认配置、工具 Schema 与提示词零私人模
   controller.ctx = null;
   const built = swarm.createSwarmTools(controller);
   const serialized = JSON.stringify(built);
-  for (const banned of [['agy/', 'argon'].join(''), ['agy/', 'sonnet'].join(''), 'gpt-' + 'oss', 'deepseek' + '-v4-pro']) {
+  for (const banned of [['agy', 'argon'].join('/'), ['agy', 'sonnet'].join('/'), 'gpt-' + 'oss', 'deepseek' + '-v4-pro']) {
     assert.ok(!serialized.includes(banned), '工具 Schema 不得硬编码模型名：' + banned);
   }
   assert.ok(
@@ -1141,17 +1254,17 @@ test('模型派发权限：默认配置、工具 Schema 与提示词零私人模
     'model 参数说明必须提示派发权限闸门'
   );
 
-  // 提示词：未挂 ACP 时既无 agy 写法，也没有任何具体模型名
+  // 提示词：没有任何外部模型路由写法，也没有任何具体模型名
   const native = prompts.COORDINATOR_SKILL_CONTENT;
-  assert.ok(!native.includes(['agy', '/'].join('')), '原生协调员规范不得出现 agy/ 写法');
+  assert.ok(!native.includes(['agy', '/'].join('')), '原生协调员规范不得出现外部路由写法');
   const worker = prompts.buildWorkerSystemPrompt({ memberName: 'w', coordinatorSessionId: 'c' });
-  for (const banned of [['agy/', 'argon'].join(''), ['agy/', 'sonnet'].join('')]) {
+  for (const banned of [['agy', 'argon'].join('/'), ['agy', 'sonnet'].join('/')]) {
     assert.ok(!native.includes(banned) && !worker.includes(banned));
   }
 
   // 设置页文案同样不得夹带任何私人模型名
   const dictSource = fs.readFileSync(path.join(PLUGIN_ROOT, 'client.js'), 'utf8');
-  for (const banned of [['agy/', 'argon'].join(''), ['agy/', 'sonnet'].join(''), 'gpt-' + 'oss']) {
+  for (const banned of [['agy', 'argon'].join('/'), ['agy', 'sonnet'].join('/'), 'gpt-' + 'oss']) {
     assert.ok(!dictSource.includes(banned), '设置页文案不得出现 ' + banned);
   }
   assert.ok(
@@ -1164,9 +1277,9 @@ test('模型派发权限：默认配置、工具 Schema 与提示词零私人模
 
 /**
  * 真实宿主 @deepseek-ai/dsh-api-gateway 的一元 Remote 调用在**成功**时返回
- * `{ ok: true, value: <payload> }`（失败时 `{ ok: false, error }`）。
- * 设置页曾经把整封响应直接交给 `parseSwarmModelsResult`，于是
- * `Array.isArray(response.models)` 永远为假，设置页固定报
+ * { ok: true, value: payload }（失败时 { ok: false, error }）。
+ * 设置页曾经把整封响应直接交给 parseSwarmModelsResult，于是
+ * Array.isArray(response.models) 永远为假，设置页固定报
  * 「未能读取宿主模型列表」——本用例锁死解包行为。
  */
 test('设置页：宿主 { ok: true, value } 信封必须先解包，否则报 models must be an array', async () => {
@@ -1258,7 +1371,7 @@ test('设置页：宿主 { ok: true, value } 信封必须先解包，否则报 m
     assert.equal(typeof injected.loadModels, 'function');
     const list = await injected.loadModels();
     assert.deepEqual(list.map((m) => m.key), ['vendor/model-a', 'vendor/model-b'], '解包后必须返回全量宿主模型目录');
-    assert.deepEqual(calls, [{ probeAgy: false }], '模型目录拉取必须保持零子进程');
+    assert.deepEqual(calls, [{}], '模型目录拉取只发空请求体');
   } finally {
     await plugin.dispose();
   }
@@ -1327,4 +1440,3 @@ test('设置页：宿主 { ok: true, value } 信封必须先解包，否则报 m
   assert.equal(okStatus.props['data-models-error'], undefined);
   assert.ok(!String(okStatus.props.className || '').includes('is-error'));
 });
-

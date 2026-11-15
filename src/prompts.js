@@ -20,7 +20,7 @@ const COORDINATOR_SKILL_CONTENT = `# /swarm — 多智能体公共留言板协�
 ## 自治内循环（「总工 - 铁匠 - 判官」，默认无限轮次）
 - 复杂研发/跨文件工程优先用本集群跑自治内循环：\`@architect\`（只读定契约）发契约 → \`@builder\` 施工自测 → \`@reviewer\` 审 diff 并亲自跑单测。
 - **同伴之间直接 \`@\` 交接，中间返工与复审严禁抄送 \`@coordinator\`**；有明确缺陷直接 \`@builder\` 返工，有契约/过度设计争议先 \`@architect\` 做 Triage 再 \`@builder\`。
-- **默认无限轮次**（\`maxConsecutivePeerWakes\` 与 \`maxAgyTurnsPerMember\` 默认 \`0\` = 不熔断）：只要属于代码施工、单测修复或技术分歧裁决，就一直在留言板闭环返工，直到 **100% 实测全绿**；仅在不可逆高危操作或需求取舍冲突时才提前 \`@coordinator\`，否则一律全绿后再由 \`@reviewer\` / \`@architect\` 汇总验收单唤醒主会话交付。
+- **默认无限轮次**：只要属于代码施工、单测修复或技术分歧裁决，就一直在留言板闭环返工，直到 **100% 实测全绿**；仅在不可逆高危操作或需求取舍冲突时才提前 \`@coordinator\`，否则一律全绿后再由 \`@reviewer\` / \`@architect\` 汇总验收单唤醒主会话交付。
 
 ## 核心工具与动作
 1. \`swarm\`：管理集群生命周期
@@ -48,21 +48,6 @@ const COORDINATOR_SKILL_CONTENT = `# /swarm — 多智能体公共留言板协�
 - 长链路或多阶段集群可额外拉起 \`monitor\`（巡检防卡死守护员，brief 中注明它是 \`monitor\`，对应内置技能 \`swarm-monitor\`）。
 - **收尾硬性顺序**：集群全部工作达成并向用户交付最终结论前，**先**对不再需要的 Worker 调用 \`swarm{action:"kill"}\` 销毁，**再**在主频道发布以 \`[done]\` 开头的纯总结结项帖（如 \`[done] 全部模块验证通过并已合入。\`——结项帖中不要 \`@\` 已休眠或已销毁的成员）。
 `;
-
-/**
- * 可选扩展 dsh-agy-acp 专属的协调员技能段落。
- *
- * 只有在宿主真正挂载了 agyAcp 服务时才拼接到协调员规范里：未安装该扩展的用户
- * 不该看到任何 `agy/<model>` 派发说明，否则模型会去尝试一个根本不存在的后端。
- */
-const AGY_ACP_SKILL_SECTION = `## 外部 agy 队友（可选扩展 dsh-agy-acp）
-- \`swarm{action:"add", name:"verifier", brief:"...", model:"agy/<model>", agy_mode?:"plan"|"accept-edits"|"default"}\`：把成员交给本机 Antigravity CLI（ACP）执行，可复用该订阅额度做**跨模型家族**审查或施工。
-  - 模型写法：\`agy/<model>\`；可用条目与档位后缀以 \`swarm{action:"models"}\` 的实际输出为准（该扩展会在输出末尾列出 \`agy/…\` 条目，\`all:true\` 时探测真实目录），未知模型或锁档冲突会当场报错并列出可用模型。
-  - \`agy_mode\`：父会话可写时默认 \`accept-edits\`；审查员请显式传 \`agy_mode:"plan"\` 锁死只读（plan 下仍可通过留言板发帖汇报）。父会话处于 Plan / 只读沙盒时强制 \`plan\`，显式传 \`accept-edits\` 会被拒绝。
-  - 能力边界（显式拒绝，不会静默降级）：不支持 \`fork\`、不支持 \`workspace:"share"\`、不能担任 \`monitor\`；\`swarm{action:"model"}\` 只能在 \`agy/…\` 之间切换，不能与 DSH 原生模型互切。
-  - 派单边界：外部 agy 运行在后台无交互子进程中，除 \`dsh_swarm_bridge\` 外无法弹窗放行额外权限审批（如 \`run_command\`、工作区外路径访问或用户全局挂载的其他第三方 MCP 工具请求审批时会被拒绝），也无法将宿主 \`.asar\` 归档当作目录读取，且文件工具默认过滤点号隐藏目录（如 \`.tmp/\`）；需要执行命令、检索外网或查看上述特殊路径时，请在分工中交给原生 DSH 队友处理。
-  - agy 队友每轮结束即自动休眠，被 \`@\` 时由宿主重新拉起一轮（续用同一 agy 会话）；若它漏调 \`post_message\`，其纯文本回复会被自动归档并 \`@\` 回触发者。阈值默认 **\`0\` = 无限不熔断**（自治内循环默认无限轮次）；仅当你在配置里显式设正整数时，连续被同伴互相唤醒或总轮次超过该阈值才触发熔断（成员转 \`stopped\` 并记录原因），届时由你裁决：\`@\` 它继续、\`swarm{action:"model"}\` 重新授权或 \`kill\`。`;
-
 const MONITOR_SKILL_CONTENT = `# swarm-monitor — 集群防卡死巡检守护员
 
 仅供 brief 明确指定为 \`monitor\` 的巡检成员加载。协调员与普通 Worker 请勿执行本流程。
@@ -86,7 +71,6 @@ function buildWorkerSystemPrompt({
   cwd,
   channels,
   isMonitor = false,
-  agyAcpAvailable = false,
 }) {
   const feedUri = buildSwarmResourceUri(coordinatorSessionId, 'feed');
   const channelList = Array.isArray(channels) && channels.length > 0 ? channels.join(', ') : 'main';
@@ -103,10 +87,7 @@ function buildWorkerSystemPrompt({
     '5. **自主派生子 Helper 与权限边界**：当你的切片任务可拆分为互不重叠的子文件或独立核验时，可调用 `swarm{action:"add", name, brief}` 拉起子 Helper 并让它汇报给 `@' + memberName + '`。你只能 `kill` 或切模型（`model`）你自己创建的 Helper，且在向你的上游交付前负责整合子 Helper 的工作并 `kill` 已完工的子 Helper。',
     '6. **严守文件边界**：只修改分配给你的独占文件范围，绝不越界改动其他同伴负责的文件。',
     '7. **角色与模型路由**：总工 `@architect` 只读定契约并裁决分歧；铁匠 `@builder` 施工自测；判官 `@reviewer` 亲自跑单测审查。成员默认继承协调员当前 DSH 路由，跨模型家族时按需传 `model: "provider/model"`——本插件不内置任何模型白名单或禁令。',
-    ...(agyAcpAvailable
-      ? ['7b. **外部 agy 队友（可选扩展 dsh-agy-acp 已启用）**：宿主已挂载 `agyAcp` 服务，`swarm{action:"add"}` 可传 `model: "agy/<model>"` 让成员走 Antigravity CLI（ACP）执行；可用模型与档位以 `swarm{action:"models"}` 的输出为准，`agy_mode` 控制只读审查 / 可写施工。']
-      : []),
-    '8. **自治内循环默认无限轮次**：`maxConsecutivePeerWakes` / `maxAgyTurnsPerMember` 默认 `0` = 不熔断。代码施工、单测修复与技术分歧都在留言板闭环返工，直到 100% 实测全绿；中间返工与复审严禁抄送 `@coordinator`。',
+    '8. **自治内循环默认无限轮次**：代码施工、单测修复与技术分歧都在留言板闭环返工，直到 100% 实测全绿再唤醒 `@coordinator`；中间返工与复审严禁抄送 `@coordinator`。',
   ];
 
   if (isMonitor) {
@@ -121,54 +102,9 @@ function buildWorkerSystemPrompt({
   return lines.join('\n');
 }
 
-/**
- * 二期：agy-acp 外部队友每一轮的提示词信封。
- *
- * agy 没有 DSH 的 systemPrompt 注入点，规则必须随 prompt 下发：首轮给完整规则，
- * 后续轮次给精简提醒（agy 会话通过 session/load 续聊，历史里已有完整规则）。
- */
-function buildAgyWorkerPromptEnvelope({ member, coordinatorSessionId, body, isInitial = false } = {}) {
-  const name = member?.name || 'worker';
-  const addedBy = member?.addedBy || 'coordinator';
-  const channels =
-    Array.isArray(member?.channels) && member.channels.length > 0 ? member.channels.join(', ') : 'main';
-  const mode = member?.agyMode || 'plan';
-  const isPlanMode = mode === 'plan';
-  const lines = ['<swarm_agy_worker>'];
-  if (isInitial) {
-    lines.push(
-      `你是 \`${name}\`（由 \`@${addedBy}\` 创建），作为外部 agy 队友加入 DeepSeek Harness Swarm 集群（主会话 \`${coordinatorSessionId || ''}\`），与其他智能体围绕同一块公共留言板协作。`,
-      `运行模式：\`${mode}\`${member?.cwd ? `；工作目录：\`${member.cwd}\`` : ''}；已订阅频道：\`${channels}\`。`,
-      '',
-      '## 留言板工具（MCP 服务 `dsh_swarm_bridge`）',
-      '1. `read_board{since?, limit?, seqs?, channel?, status?, inbox_only?}`：增量读板。被唤醒后先用 `since: <上次读到的最大 seq>` 阅读新消息；`status:true` 查看成员状态。引用前文直接写 `#序号`。',
-      '2. `post_message{text, channel?}`：以你的身份发帖（身份由宿主强制绑定，无需也无法冒充他人）。**必须**写 `@收件人`（如 `@' + addedBy + '`、`@组前缀`、`@#频道`）才会唤醒对方；中间交接只 `@` 下一棒，最终成果或只有协调员能拍板的阻塞才 `@coordinator`。单轮最多 8 条，请合并成一条高信息量的结论帖。',
-      '',
-      '## 轮次与休眠规则',
-      '- 完成本轮工作后调用 `post_message` 汇报，然后**直接结束本轮回复**即进入零消耗休眠；被 `@` 时宿主会自动拉起你的下一轮，**不存在也不需要 `swarm_wait`**。',
-      '- 不要发“收到 / 开始处理”之类的空帖；第一条帖子就应是结论、交付物或具体阻塞提问。',
-      '- 若你忘记调用 `post_message`，宿主会把你的最终纯文本回复自动归档并 `@` 回触发者——但请务必主动发帖，归档只是兜底。',
-      '- **严禁调用 `invoke_subagent` 或任何后台子任务**：其结果无法回收，本轮会被判为失败。',
-      isPlanMode
-        ? '- **只读与后台权限边界（`plan` 模式）**：本轮锁死只读，仅通过留言板汇报；除 `dsh_swarm_bridge` 外，任何触发权限审批的请求（如 `run_command`、写操作、工作区外路径访问或用户全局挂载的其他第三方 MCP 工具）都会被直接拒绝并可能中断本轮。若某项操作被权限拒绝，请直接放弃该动作、切勿尝试换工具绕过。'
-        : '- **工作区编辑与后台权限边界**：只修改分配给你的工作区内文件范围；本轮在后台无交互运行，除 `dsh_swarm_bridge` 外无法弹出额外权限审批（如 `run_command`、工作区外路径访问或用户全局挂载的其他第三方 MCP 工具一旦请求审批会被 fail-closed 拒绝并可能中断本轮；若被拒绝请直接放弃该动作，切勿尝试绕过）。',
-      '- **外部进程路径限制**：独立 agy 进程无法将宿主 `.asar` 归档当作目录读取，文件工具默认也会过滤点号隐藏目录（如 `.tmp/`）；需要执行命令、检索外网或查看上述特殊路径时，请用 `post_message` `@` 原生队友或 `@' + addedBy + '` 代查。',
-      '- 自治内循环默认无限轮次（无 3 轮 / 12 跳上限）：与 @architect / @reviewer 在留言板内闭环返工，直到 100% 单测全绿；仅不可逆高危操作或需求取舍冲突才提前 @coordinator。',
-      '- 模型选择：成员默认沿用宿主已配置的 DSH 路由；需要跨模型家族时由协调员显式指定 `provider/model`，本插件不内置任何模型白名单（用户在设置页勾选的派发权限清单会在此生效）。',
-      ''
-    );
-  } else {
-    const modeReminder = isPlanMode
-      ? '后台 `plan` 只读边界：仅用工作区内只读文件工具与 `dsh_swarm_bridge`，勿调用 `run_command`、其他第三方 MCP 工具、工作区外路径或读取 `.asar`/`.tmp/`（需命令/外网/特殊路径请 `@` 原生队友代查；操作被拒时勿尝试绕过）。'
-      : '后台无交互边界：仅修改分配的工作区内文件，勿调用需额外审批的 `run_command`、其他第三方 MCP 工具、工作区外路径或读取 `.asar`/`.tmp/`（需命令/外网/特殊路径请 `@` 原生队友代查；操作被拒时勿尝试绕过）。';
-    lines.push(
-      `你是 Swarm 外部 agy 队友 \`${name}\`（模式：\`${mode}\`）。以下是唤醒你的新留言；处理完毕后用 \`post_message\`（带 \`@收件人\`）汇报并直接结束本轮即可休眠（无需 swarm_wait，严禁 invoke_subagent）。`,
-      modeReminder,
-      ''
-    );
-  }
-  lines.push(String(body ?? ''), '</swarm_agy_worker>');
-  return lines.join('\n');
+/** 协调员规范正文（纯原生 DSH 能力说明，不含任何可选扩展段落）。 */
+function buildCoordinatorSkillContent() {
+  return COORDINATOR_SKILL_CONTENT;
 }
 
 /**
@@ -177,22 +113,12 @@ function buildAgyWorkerPromptEnvelope({ member, coordinatorSessionId, body, isIn
  * 与宿主 `@deepseek-ai/dsh-skill` 的 `renderSkillContent` 格式保持一致：
  * - 首次调用（或前序注入已被 `/compact` 替换）：注入完整 `<skill_content name="swarm">` 与协调员规范；
  * - 同一会话可见上下文已存在完整 `swarm` 技能说明时（`compact: true`）：仅注入轻量面板锚点提示，避免重复堆叠长文。
- *
- * 拼装协调员规范正文：默认（未安装可选扩展）只输出 DSH 原生能力说明。
- * `agyAcpAvailable` 为真时才追加外部 ACP 队友段落，避免给未安装 dsh-agy-acp
- * 的用户灌输一个并不存在的派发后端。
  */
-function buildCoordinatorSkillContent({ agyAcpAvailable = false } = {}) {
-  if (!agyAcpAvailable) return COORDINATOR_SKILL_CONTENT;
-  return `${COORDINATOR_SKILL_CONTENT}\n\n${AGY_ACP_SKILL_SECTION}`;
-}
-
 function buildCoordinatorSkillInjection({
   sessionId,
   panelUri,
   graphUri,
   compact = false,
-  agyAcpAvailable = false,
 } = {}) {
   const sid = String(sessionId || '');
   const resolvedPanelUri = panelUri || (sid ? buildSwarmResourceUri(sid) : '');
@@ -209,7 +135,7 @@ function buildCoordinatorSkillInjection({
     ].join('\n');
   }
 
-  const content = buildCoordinatorSkillContent({ agyAcpAvailable });
+  const content = buildCoordinatorSkillContent();
   const instructions = sid ? content.replaceAll('<coordinatorSessionId>', sid) : content;
 
   return [
@@ -229,11 +155,9 @@ function buildCoordinatorSkillInjection({
 }
 
 module.exports = {
-  AGY_ACP_SKILL_SECTION,
   buildCoordinatorSkillContent,
   COORDINATOR_SKILL_CONTENT,
   MONITOR_SKILL_CONTENT,
   buildWorkerSystemPrompt,
-  buildAgyWorkerPromptEnvelope,
   buildCoordinatorSkillInjection,
 };

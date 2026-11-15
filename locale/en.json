@@ -1,6 +1,6 @@
 {
   "meta": {
     "title": "Swarm Multi-Agent Board",
-    "description": "Antigravity-style /swarm for DSH: shared #seq message board, @mention & #channel wakeups, zero-cost turn-concluding wait, session forking, hot model switching, and live sidebar Feed/Roster/Graph."
+    "description": "Native DSH multi-agent collaboration cluster: shared #seq message board, @mention & #channel wakeups, zero-cost turn-concluding wait, session forking, hot model switching, and live sidebar Feed/Roster/Graph."
   }
 }

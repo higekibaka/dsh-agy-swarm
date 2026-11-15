@@ -46,39 +46,6 @@
     share: 'Git 工作树 (share)',
   });
 
-  /** 外部 agy 队友的阶段文案（与 Host 侧 AGY_PHASE_LABELS 对齐的简表）。 */
-  const AGY_PHASE_TEXT = Object.freeze({
-    queued: '排队中',
-    spawn: '进程启动',
-    spawning: '进程启动',
-    initialize: 'ACP 握手',
-    initializing: 'ACP 握手',
-    new: '建会话',
-    creating_session: '建会话',
-    load: '加载会话',
-    loading_session: '加载会话',
-    configure: '应用配置',
-    configuring: '应用配置',
-    prompt: '生成中',
-    prompting: '生成中',
-    cancelling: '取消中',
-    stopping: '停止中',
-  });
-
-  /** Token 数量紧凑展示（1.2K / 3.4M）。 */
-  function formatTokenCount(value) {
-    if (!Number.isFinite(value) || value < 0) return '0';
-    if (value < 1000) return String(value);
-    if (value < 1000000) return (value / 1000).toFixed(value < 10000 ? 1 : 0) + 'K';
-    return (value / 1000000).toFixed(1) + 'M';
-  }
-
-  /** 缓存命中率百分比（0..1 → 87.5%）。 */
-  function formatHitRate(value) {
-    if (!Number.isFinite(value) || value <= 0) return '0%';
-    return (Math.min(1, value) * 100).toFixed(value < 0.1 ? 1 : 0) + '%';
-  }
-
   // ── 专属设置页（settings.section id: 'dsh-agy-swarm'）────────────────────
 
   const SWARM_SETTINGS_ID = 'dsh-agy-swarm';
@@ -87,57 +54,29 @@
   const SWARM_SETTINGS_ID_LEGACY = 'local-dsh-swarm';
   const SWARM_SETTINGS_ORDER = 39;
 
-  /** 与 Host 侧 SWARM_CONFIG_DEFAULTS 严格一致：恢复默认即写回这四项。 */
+  /** 与 Host 侧 SWARM_CONFIG_DEFAULTS 严格一致：恢复默认 = 关闭严格白名单 + 清空两个列表。 */
   const SETTINGS_DEFAULTS = Object.freeze({
-    maxConsecutivePeerWakes: 0,
-    maxAgyTurnsPerMember: 0,
-    maxAgyPostsPerTurn: 8,
-    nodeExecutable: '',
-    // 模型派发权限：恢复默认 = 关闭严格白名单 + 两个列表同时清空（完全放行）。
     strictAllowlist: false,
     allowedModels: Object.freeze([]),
     blockedModels: Object.freeze([]),
   });
 
-  const SETTINGS_PRESETS = Object.freeze({
-    maxConsecutivePeerWakes: [0, 6, 12, 24],
-    maxAgyTurnsPerMember: [0, 16, 32, 64],
-    maxAgyPostsPerTurn: [4, 8, 16],
-  });
-
   const SETTINGS_DICTS = {
     zh: {
       title: 'Swarm 协作集群',
-      subtitle: '自治内循环（总工 @architect → 铁匠 @builder → 判官 @reviewer）默认无限轮次运行，直到实测全绿才收口。',
+      subtitle: '纯原生 DSH 多智能体集群：自治内循环（总工 @architect → 铁匠 @builder → 判官 @reviewer）在共享留言板上闭环返工，直到实测全绿才收口。',
       summaryLabel: '当前配置',
-      summaryPeer: '同伴唤醒上限',
-      summaryTurns: '单成员轮次上限',
-      summaryPosts: '单轮发帖上限',
-      summaryNode: 'ACP 桥 Node',
-      infinite: '无限',
       loading: '正在读取配置…',
       unavailable: '此连接无法读取宿主设置。',
       readonlyBanner: '当前连接只能查看设置，不能修改。',
       saving: '保存中…',
       saved: '已保存',
       error: '保存失败，请重试。',
-      loopTitle: '自治内循环唤醒与轮次上限',
-      peerLabel: '连续同伴唤醒上限 maxConsecutivePeerWakes',
-      peerHint: '0 = 无限（推荐）：总工-铁匠-判官在留言板内循环返工不设轮次上限；正整数则超过即熔断停火。',
-      turnsLabel: '单成员总轮次上限 maxAgyTurnsPerMember（可选 ACP 扩展项）',
-      turnsHint: '0 = 无限（推荐）；正整数在成员累计激活轮次超过该值时拦截唤醒并置 stopped。仅对 model:"agy/<model>" 的外部队友（需安装 dsh-agy-acp）生效。',
-      postsLabel: '单轮发帖上限 maxAgyPostsPerTurn',
-      postsHint: '外部 ACP 队友单轮最多能发几条留言，超出返回 429 强制合并；仅在启用可选扩展 dsh-agy-acp 时生效。',
-      runtimeTitle: '外部 ACP 桥运行时（可选扩展 dsh-agy-acp）',
-      nodeLabel: '桥进程 Node 可执行文件 nodeExecutable（可选 ACP 扩展项）',
-      nodePlaceholder: '留空 = 自动解析宿主捆绑 Node',
-      nodeHint: '仅在启用 dsh-agy-acp 且 Electron 宿主无法自动解析纯 node 时才需要手填绝对路径；留空即可满足绝大多数场景。',
-      saveNode: '保存路径',
       resetDefaults: '恢复默认设置',
-      guideTitle: '自治内循环使用说明',
+      guideTitle: '集群使用说明',
       guideLoop: '复杂研发优先 /swarm 拉起 @architect（规划只读定契约）、@builder（施工自测）、@reviewer（独立审查实测）三角色后休眠；同伴之间直接 @ 交接，中间返工绝不抄送 @coordinator。',
-      guideFallback: '内循环默认无限轮次：只要属于代码施工、单测修复或技术分歧 Triage，就一直在留言板闭环直到 100% 实测全绿；仅不可逆高危操作或需求取舍冲突才提前 @coordinator。',
-      guideModels: '模型调度：成员默认继承协调员当前的 DSH 模型路由；需要跨模型家族时可按需指定任意已配置的 model（provider/model）。安装可选扩展 dsh-agy-acp 后，还会额外出现 agy/<model> 外部队友条目（以 swarm{action:"models"} 的实际输出为准）；未安装时该扩展项自动隐藏。',
+      guideFallback: '内循环不设轮次上限：只要属于代码施工、单测修复或技术分歧 Triage，就一直在留言板闭环直到 100% 实测全绿；仅不可逆高危操作或需求取舍冲突才提前 @coordinator。',
+      guideModels: '模型调度：成员默认继承协调员当前的 DSH 模型路由；需要跨模型家族时可按需指定任意已在宿主配置好的 model（provider/model）。本插件不内置任何模型白名单或禁令。',
       summaryModels: '模型派发权限',
       modeWhitelist: '严格白名单',
       modeWhitelistEmpty: '严格白名单（空 = 全禁）',
@@ -162,40 +101,22 @@
       blockedListLabel: '黑名单',
       emptyRules: '（空）',
       removeRule: '移除',
-      agyOverlapHint: '若使用 agy/... 外部队友：dsh-agy-acp 设置页里的禁用 / 仅 Plan 规则会与此处叠加生效，两侧都放行才能真正派发。',
     },
     en: {
       title: 'Swarm Collaboration Cluster',
-      subtitle: 'The autonomous inner loop (architect → builder → reviewer) runs unlimited rounds by default until tests are fully green.',
+      subtitle: 'A native DSH multi-agent cluster: the autonomous inner loop (architect → builder → reviewer) reworks on the shared board until tests are fully green.',
       summaryLabel: 'Current configuration',
-      summaryPeer: 'Peer wake limit',
-      summaryTurns: 'Per-member turn limit',
-      summaryPosts: 'Posts per turn',
-      summaryNode: 'ACP bridge node',
-      infinite: 'unlimited',
       loading: 'Loading configuration…',
       unavailable: 'This connection cannot read host settings.',
       readonlyBanner: 'This connection can only view settings.',
       saving: 'Saving…',
       saved: 'Saved',
       error: 'Save failed, please retry.',
-      loopTitle: 'Inner-loop wake and turn limits',
-      peerLabel: 'Consecutive peer wakes (maxConsecutivePeerWakes)',
-      peerHint: '0 = unlimited (recommended): the architect-builder-reviewer loop may rework without a round cap; a positive value trips the circuit breaker.',
-      turnsLabel: 'Total turns per member (maxAgyTurnsPerMember, optional ACP extension)',
-      turnsHint: '0 = unlimited (recommended); a positive value stops the member once its activation count exceeds it. Only applies to external model:"agy/<model>" teammates, which require dsh-agy-acp.',
-      postsLabel: 'Posts per turn (maxAgyPostsPerTurn)',
-      postsHint: 'How many board posts an external ACP teammate may send per turn; extra posts get HTTP 429. Only relevant when the optional dsh-agy-acp extension is installed.',
-      runtimeTitle: 'External ACP bridge runtime (optional dsh-agy-acp extension)',
-      nodeLabel: 'Bridge node executable (nodeExecutable, optional ACP extension)',
-      nodePlaceholder: 'Empty = resolve the host bundled node automatically',
-      nodeHint: 'Only needed when dsh-agy-acp is installed and the Electron host cannot resolve a plain node executable; leaving it empty covers almost every setup.',
-      saveNode: 'Save path',
       resetDefaults: 'Restore defaults',
-      guideTitle: 'How the autonomous inner loop works',
+      guideTitle: 'How the cluster works',
       guideLoop: 'Start /swarm with @architect (read-only planning and contracts), @builder (implementation and self-test) and @reviewer (independent review), then park. Peers hand off with direct @ mentions and never cc @coordinator mid-loop.',
-      guideFallback: 'The loop is unlimited by default: keep iterating on the board until 100% tests pass; only irreversible high-risk actions or requirement tradeoffs should ping @coordinator early.',
-      guideModels: 'Model routing: members inherit the coordinator current DSH route by default; pass any configured model (provider/model) when you need a different model family. With the optional dsh-agy-acp extension installed, agy/<model> external teammate entries appear as well (see the live swarm{action:"models"} output); they stay hidden when the extension is absent.',
+      guideFallback: 'The loop has no round cap: keep iterating on the board until 100% tests pass; only irreversible high-risk actions or requirement tradeoffs should ping @coordinator early.',
+      guideModels: 'Model routing: members inherit the coordinator current DSH route by default; pass any model (provider/model) already configured in this DSH installation when you need a different model family. This plugin ships no built-in allowlist or ban.',
       summaryModels: 'Model dispatch',
       modeWhitelist: 'strict whitelist',
       modeWhitelistEmpty: 'strict whitelist (empty = deny all)',
@@ -220,14 +141,8 @@
       blockedListLabel: 'Blocklist',
       emptyRules: '(empty)',
       removeRule: 'Remove',
-      agyOverlapHint: 'For agy/... external teammates: disable / plan-only rules in the dsh-agy-acp settings stack with this gate, so both sides must permit the model.',
     },
   };
-
-  /** 设置页数值字段归一化（0 合法 = 无限）。 */
-  function normalizeSettingsCount(raw, fallback, min = 0) {
-    return Number.isSafeInteger(raw) && raw >= min ? raw : fallback;
-  }
 
   // ── Pure Address & Protocol Helpers ─────────────────────────────────────
 
@@ -398,65 +313,6 @@
     return 'waiting';
   }
 
-  /** 非负安全整数（客户端侧与 Host 归一化口径保持一致）。 */
-  function nonNegInt(value, fallback = 0) {
-    return Number.isSafeInteger(value) && value >= 0 ? value : fallback;
-  }
-
-  /**
-   * 外部 agy 队友的瞬态阶段（契约 3.2）：`{ runId, phase, pid, activity }`。
-   * 空闲 / 原生 DSH 成员一律 null，绝不让面板渲染残缺对象。
-   */
-  function normalizeAgyLive(raw) {
-    if (!isPlainObject(raw)) return null;
-    const phase = typeof raw.phase === 'string' ? raw.phase.slice(0, 32) : '';
-    if (!phase) return null;
-    return {
-      runId: typeof raw.runId === 'string' ? raw.runId.slice(0, 64) : '',
-      phase,
-      pid: Number.isSafeInteger(raw.pid) && raw.pid > 0 ? raw.pid : 0,
-      activity: typeof raw.activity === 'string' ? raw.activity.slice(0, 240) : '',
-    };
-  }
-
-  function normalizeHitRate(raw, cacheRead, totalInput) {
-    let value = 0;
-    if (typeof raw === 'number' && Number.isFinite(raw)) {
-      value = raw >= 0 && raw <= 1 ? raw : raw > 1 && raw <= 100 ? raw / 100 : 0;
-    } else if (totalInput > 0 && cacheRead > 0) {
-      value = cacheRead / totalInput;
-    }
-    return Math.round(Math.min(1, Math.max(0, value)) * 10000) / 10000;
-  }
-
-  /** 累计 Token 账单（契约 3.2 的 `agyUsage`）：无账单时为 null。 */
-  function normalizeAgyUsage(raw) {
-    if (!isPlainObject(raw)) return null;
-    const totalInput = nonNegInt(raw.totalInput, 0);
-    const cacheRead = Math.min(nonNegInt(raw.cacheRead, 0), totalInput);
-    const totalOutput = nonNegInt(raw.totalOutput, 0);
-    const last = isPlainObject(raw.lastTurnTokens)
-      ? {
-          stepCount: nonNegInt(raw.lastTurnTokens.stepCount, 0),
-          totalInput: nonNegInt(raw.lastTurnTokens.totalInput, 0),
-          cacheRead: nonNegInt(raw.lastTurnTokens.cacheRead, 0),
-          totalOutput: nonNegInt(raw.lastTurnTokens.totalOutput, 0),
-          thinking: nonNegInt(raw.lastTurnTokens.thinking, 0),
-          cacheHitRate: normalizeHitRate(undefined, nonNegInt(raw.lastTurnTokens.cacheRead, 0), nonNegInt(raw.lastTurnTokens.totalInput, 0)),
-        }
-      : null;
-    return {
-      turns: nonNegInt(raw.turns, 0),
-      stepCount: nonNegInt(raw.stepCount, 0),
-      totalInput,
-      cacheRead,
-      totalOutput,
-      thinking: Math.min(nonNegInt(raw.thinking, 0), totalOutput),
-      cacheHitRate: normalizeHitRate(raw.cacheHitRate, cacheRead, totalInput),
-      lastTurnTokens: last,
-    };
-  }
-
   function normalizeMember(raw) {
     if (!isPlainObject(raw)) return null;
     const name = typeof raw.name === 'string' && raw.name.trim() ? raw.name.trim() : null;
@@ -472,12 +328,6 @@
       sessionId: typeof raw.sessionId === 'string' ? raw.sessionId : '',
       role: typeof raw.role === 'string' && raw.role ? raw.role : (name === 'coordinator' ? 'coordinator' : (name === 'monitor' || name.startsWith('monitor-') ? 'monitor' : 'worker')),
       addedBy: typeof raw.addedBy === 'string' && raw.addedBy ? raw.addedBy : 'coordinator',
-      // 二期：成员后端（'dsh' 原生会话 / 'agy-acp' 外部 ACP 队友，没有可打开的原生会话）。
-      backend: typeof raw.backend === 'string' && raw.backend ? raw.backend : 'dsh',
-      // 二期：外部 agy 队友的只读模式、实时阶段与累计 Token 账单（原生成员为零值）。
-      agyMode: typeof raw.agyMode === 'string' ? raw.agyMode : '',
-      agyLive: normalizeAgyLive(raw.agyLive),
-      agyUsage: normalizeAgyUsage(raw.agyUsage),
       provider,
       model,
       modelDisplay,
@@ -628,22 +478,21 @@
     return normalizeRuleList(list).some((rule) => keys.includes(rule.toLowerCase()));
   }
 
-  /** `getSwarmModels` 请求校验：`{}` / `undefined` / `{ probeAgy?: boolean }`。 */
+  /**
+   * `getSwarmModels` 请求校验：任意 plain object 都归一化为 `{}`。
+   *
+   * 旧版客户端缓存可能仍带 `{ probeAgy: false }` 等已移除字段，必须忽略而不是报错；
+   * 只有非 plain object 才抛协议错误。
+   */
   function parseSwarmModelsRequest(value) {
     const fail = (detail) => {
       const err = new Error('dsh-swarm invalid models request: ' + detail);
       err.code = 'DSH_SWARM_INVALID_REQUEST';
       return err;
     };
-    if (value === undefined || value === null) return { probeAgy: false };
-    if (!isPlainObject(value)) throw fail('expected a JSON object');
-    for (const key of Object.keys(value)) {
-      if (key !== 'probeAgy') throw fail('unexpected key "' + key + '"');
-    }
-    if (value.probeAgy !== undefined && value.probeAgy !== null && typeof value.probeAgy !== 'boolean') {
-      throw fail('probeAgy must be boolean');
-    }
-    return { probeAgy: value.probeAgy === true };
+    if (value === undefined || value === null) return {};
+    if (isPlainObject(value)) return {};
+    throw fail('expected a JSON object');
   }
 
   /** `getSwarmModels` 结果归一化：`{ models: [...] }`，逐条丢弃未知字段。 */
@@ -1366,14 +1215,6 @@
    * supporting both the continuable subagent descriptor object and single-string fallback.
    */
   function openMemberSession(ctx, snapshot, member) {
-    // 二期：外部 agy ACP 队友只有虚拟 sessionId（agy-<uuid>），没有可打开的原生会话。
-    if (member && member.backend === 'agy-acp') {
-      return {
-        ok: false,
-        reason: 'external-agy',
-        error: '@' + member.name + ' 是外部 agy ACP 队友，没有原生会话轨迹；请通过 Swarm 留言板与其交互',
-      };
-    }
     const workspace = resolveService(ctx, 'uiWorkspace');
     if (!workspace || typeof workspace.openSession !== 'function') {
       return { ok: false, error: '当前环境不支持会话切换（uiWorkspace 不可用）' };
@@ -1411,37 +1252,6 @@
       }
     }
   }
-
-  /**
-   * 打开可选扩展 dsh-agy-acp 的右侧栏 ACP 监控面板（契约 3.2）。
-   * 外部 agy 队友没有原生会话轨迹，但它们的单步账单 / PID / 停止按钮都在 ACP 面板里。
-   */
-  function openMemberAcpMonitor(ctx, snapshot, member) {
-    const sidebarRight = resolveService(ctx, 'sidebarRight');
-    if (!sidebarRight || typeof sidebarRight.openResource !== 'function') {
-      return { ok: false, error: '右侧边栏服务 sidebarRight 暂不可用' };
-    }
-    const coordId =
-      snapshot && typeof snapshot.coordinatorSessionId === 'string' && snapshot.coordinatorSessionId
-        ? snapshot.coordinatorSessionId
-        : member && typeof member.sessionId === 'string'
-          ? member.sessionId
-          : '';
-    const address = 'dsh-resource://agy-acp/' + encodeURIComponent(coordId || 'global');
-    try {
-      sidebarRight.openResource(address, { kind: 'agy-acp' });
-      return { ok: true, address };
-    } catch (err) {
-      // 宿主未注册 agy-acp 的资源 kind 时降级为纯地址打开，绝不因此报错阻塞面板。
-      try {
-        sidebarRight.openResource(address);
-        return { ok: true, address };
-      } catch (fallbackErr) {
-        return { ok: false, error: formatErrorMessage(fallbackErr) };
-      }
-    }
-  }
-
 
   /**
    * 构造 `dsh-agy-swarm` 专属设置面板。
@@ -1528,11 +1338,6 @@
       const writable = isReady && state.writable === true;
       const disabled = pending || !writable;
 
-      const peerLimit = normalizeSettingsCount(value.maxConsecutivePeerWakes, SETTINGS_DEFAULTS.maxConsecutivePeerWakes);
-      const turnLimit = normalizeSettingsCount(value.maxAgyTurnsPerMember, SETTINGS_DEFAULTS.maxAgyTurnsPerMember);
-      const postLimit = normalizeSettingsCount(value.maxAgyPostsPerTurn, SETTINGS_DEFAULTS.maxAgyPostsPerTurn, 1);
-      const nodeExecutable = typeof value.nodeExecutable === 'string' ? value.nodeExecutable : SETTINGS_DEFAULTS.nodeExecutable;
-
       // ── 模型派发权限（白名单 allowedModels / 黑名单 blockedModels）──────────
       const [whitelistDraft, setWhitelistDraft] = useState(null);
       const allowedRules = normalizeRuleList(value.allowedModels);
@@ -1556,11 +1361,6 @@
       });
       const modelRuleOf = (entry) =>
         entry.key || (entry.provider && entry.model ? entry.provider + '/' + entry.model : entry.model);
-
-      const countText = (count, fallback) => (count === 0 ? t('infinite') : String(count === undefined ? fallback : count));
-      const nodeSummary = nodeExecutable.trim()
-        ? nodeExecutable.trim().split(/[\\/]/).pop()
-        : t('nodePlaceholder');
 
       let status = '';
       if (state && state.status === 'loading') status = t('loading');
@@ -1599,11 +1399,6 @@
         draftRef.current = next;
         setDrafts(next);
       };
-      const saveField = (key) => {
-        if (!Object.prototype.hasOwnProperty.call(draftRef.current, key)) return undefined;
-        return updateField(key, draftRef.current[key]);
-      };
-
       const dropDraft = (key) => {
         if (!Object.prototype.hasOwnProperty.call(draftRef.current, key)) return;
         const next = { ...draftRef.current };
@@ -1768,27 +1563,6 @@
         }
       };
 
-      const presetRow = (field, labelText, hintText, presets) =>
-        h('div', { className: 'dsh-swarm-settings-row', 'data-field-row': field },
-          h('strong', null, labelText),
-          h('div', { className: 'dsh-swarm-settings-group', role: 'group', 'aria-label': labelText },
-            ...presets.map((preset) => h('button', {
-              key: field + '-' + String(preset),
-              type: 'button',
-              className: 'dsh-swarm-settings-chip',
-              'data-field': field,
-              'data-value': String(preset),
-              'aria-pressed': String((field === 'maxAgyPostsPerTurn' ? postLimit : field === 'maxAgyTurnsPerMember' ? turnLimit : peerLimit) === preset),
-              disabled,
-              onClick: () => updateField(field, preset),
-            }, preset === 0 ? t('infinite') : String(preset)))
-          ),
-          h('p', { className: 'dsh-swarm-settings-hint' }, hintText)
-        );
-
-      const fieldValue = Object.prototype.hasOwnProperty.call(drafts, 'nodeExecutable')
-        ? drafts.nodeExecutable
-        : nodeExecutable;
       const manualDraft = Object.prototype.hasOwnProperty.call(drafts, 'manualModelRule')
         ? drafts.manualModelRule
         : '';
@@ -1812,10 +1586,6 @@
           isReady
             ? h('span', null,
                 t('summaryLabel') + ' · ' +
-                t('summaryPeer') + ' ' + countText(peerLimit) + ' · ' +
-                t('summaryTurns') + ' ' + countText(turnLimit) + ' · ' +
-                t('summaryPosts') + ' ' + String(postLimit) + ' · ' +
-                t('summaryNode') + ' ' + nodeSummary + ' · ' +
                 t('summaryModels') + ' ' +
                 (whitelistMode
                   ? (allowedRules.length === 0
@@ -1823,12 +1593,6 @@
                       : t('modeWhitelist') + ' ' + String(allowedRules.length))
                   : t('modeBlacklist') + ' ' + String(blockedRules.length)))
             : h('span', null, status)
-        ),
-        h('div', { className: 'dsh-swarm-settings-card', 'data-card': 'loop' },
-          h('h3', null, t('loopTitle')),
-          presetRow('maxConsecutivePeerWakes', t('peerLabel'), t('peerHint'), SETTINGS_PRESETS.maxConsecutivePeerWakes),
-          presetRow('maxAgyTurnsPerMember', t('turnsLabel'), t('turnsHint'), SETTINGS_PRESETS.maxAgyTurnsPerMember),
-          presetRow('maxAgyPostsPerTurn', t('postsLabel'), t('postsHint'), SETTINGS_PRESETS.maxAgyPostsPerTurn)
         ),
         h('div', { className: 'dsh-swarm-settings-card', 'data-card': 'models' },
           h('h3', null, t('modelsTitle')),
@@ -1948,35 +1712,7 @@
                   disabled,
                   onClick: () => removeRuleChip('blocked', rule),
                 }, rule + ' ✕')))
-          ),
-          h('p', { className: 'dsh-swarm-settings-hint', 'data-role': 'agy-overlap-hint' }, t('agyOverlapHint'))
-        ),
-        h('div', { className: 'dsh-swarm-settings-card', 'data-card': 'runtime' },
-          h('h3', null, t('runtimeTitle')),
-          h('label', { htmlFor: 'dsh-swarm-nodeExecutable' }, t('nodeLabel')),
-          h('input', {
-            id: 'dsh-swarm-nodeExecutable',
-            name: 'nodeExecutable',
-            type: 'text',
-            autoComplete: 'off',
-            spellCheck: false,
-            placeholder: t('nodePlaceholder'),
-            value: fieldValue,
-            disabled,
-            'data-field': 'nodeExecutable',
-            onChange: (event) => editField('nodeExecutable', event.target.value),
-            onBlur: () => saveField('nodeExecutable'),
-          }),
-          h('div', { className: 'dsh-swarm-settings-row' },
-            h('button', {
-              type: 'button',
-              className: 'dsh-swarm-settings-chip',
-              'data-action': 'save-nodeExecutable',
-              disabled: disabled || !Object.prototype.hasOwnProperty.call(drafts, 'nodeExecutable'),
-              onClick: () => saveField('nodeExecutable'),
-            }, t('saveNode'))
-          ),
-          h('p', { className: 'dsh-swarm-settings-hint' }, t('nodeHint'))
+          )
         ),
         h('div', { className: 'dsh-swarm-settings-card' },
           h('p', {
@@ -2696,12 +2432,6 @@
           setNavError(res.ok ? '' : (res.error || '无法打开成员会话'));
         };
 
-        // 外部 agy 队友没有原生轨迹，改为打开 dsh-agy-acp 的右侧栏监控面板。
-        const handleAcpMonitor = (member) => {
-          const res = openMemberAcpMonitor(ctx, snapshot, member);
-          setNavError(res.ok ? '' : (res.error || '无法打开 ACP 监控面板'));
-        };
-
         return h(React.Fragment, null,
           navError
             ? h('div', { className: 'dsh-swarm-member-error', role: 'alert' }, navError)
@@ -2729,26 +2459,16 @@
                     : member.state;
                 const stateMeta = STATE_META[displayState] || STATE_META.waiting;
                 const wsLabel = WORKSPACE_LABELS[member.workspace] || member.workspace;
-                const isExternalAgy = member.backend === 'agy-acp';
-                const live = isExternalAgy ? member.agyLive : null;
-                const usage = isExternalAgy ? member.agyUsage : null;
-                const liveLabel = live ? (AGY_PHASE_TEXT[live.phase] || live.phase) : '';
-                const tokenLabel = usage
-                  ? '↑' + formatTokenCount(usage.totalInput) + ' ↓' + formatTokenCount(usage.totalOutput)
-                  : '';
-                const hitLabel = usage ? '缓存 ' + formatHitRate(usage.cacheHitRate) : '';
-                return h(isExternalAgy ? 'div' : 'button', {
+                return h('button', {
                   key: member.name,
-                  ...(isExternalAgy ? { role: 'group', 'data-swarm-backend': 'agy-acp' } : { type: 'button' }),
+                  type: 'button',
                   className: 'dsh-swarm-member',
                   'data-swarm-member': member.name,
                   'data-killed': String(member.killed),
                   style: depth > 0 ? { marginLeft: String(Math.min(depth * 14, 42)) + 'px', width: `calc(100% - ${Math.min(depth * 14, 42)}px)` } : undefined,
                   title: (member.cwd ? ('工作目录: ' + member.cwd + '\n') : '') +
-                    (isExternalAgy
-                      ? '外部 agy ACP 队友：没有原生会话轨迹，唤醒与交互统一走 Swarm 留言板'
-                      : '查看该成员原生会话轨迹（只读浏览历史；唤醒与交互统一走 Swarm 留言板）'),
-                  ...(isExternalAgy ? {} : { onClick: () => handleOpen(member) }),
+                    '查看该成员原生会话轨迹（只读浏览历史；唤醒与交互统一走 Swarm 留言板）',
+                  onClick: () => handleOpen(member),
                 },
                   h('div', { className: 'dsh-swarm-member-top' },
                     depth > 0 ? h('span', { style: { opacity: 0.55, fontSize: '12px' }, 'aria-hidden': true }, '↳') : null,
@@ -2758,19 +2478,10 @@
                     member.role && member.role !== 'worker'
                       ? h('span', { className: 'dsh-swarm-badge' }, member.role)
                       : null,
-                    isExternalAgy
-                      ? h('span', { className: 'dsh-swarm-badge', title: '外部 ACP 队友（dsh-agy-acp），通过留言板交互' }, 'ACP · 外部队友')
-                      : h('span', { className: 'dsh-swarm-jump-hint' }, '查看会话轨迹 →'),
-                    live
-                      ? h('span', {
-                          className: 'dsh-swarm-badge dsh-swarm-badge-live',
-                          'data-agy-phase': live.phase,
-                          title: '实时阶段（来源：dsh-agy-acp onProgress）',
-                        }, '⚡ ' + liveLabel)
-                      : null
+                    h('span', { className: 'dsh-swarm-jump-hint' }, '查看会话轨迹 →')
                   ),
                   h('div', { className: 'dsh-swarm-member-meta' },
-                    h('span', { className: 'dsh-swarm-badge', title: isExternalAgy ? '外部 agy 模型' : 'DSH 模型路由' },
+                    h('span', { className: 'dsh-swarm-badge', title: 'DSH 模型路由' },
                       member.modelDisplay + (member.reasoningEffort ? ' · ' + member.reasoningEffort : '')),
                     h('span', null, wsLabel),
                     member.addedBy
@@ -2784,37 +2495,6 @@
                       ? h('span', null, '频道: ' + member.channels.map((c) => '#' + c).join(', '))
                       : null
                   ),
-                  isExternalAgy && (live || usage)
-                    ? h('div', { className: 'dsh-swarm-member-meta', 'data-role': 'agy-live' },
-                        live
-                          ? h('span', {
-                              className: 'dsh-swarm-badge',
-                              'data-role': 'agy-pid',
-                              title: live.pid > 0 ? 'agy.exe 进程 PID' : '宿主托管进程（未暴露 PID）',
-                            }, live.pid > 0 ? 'PID ' + String(live.pid) : '宿主托管' + (live.runId ? ' · ' + live.runId : ''))
-                          : null,
-                        usage
-                          ? h('span', { className: 'dsh-swarm-badge', 'data-role': 'agy-tokens', title: '累计输入 / 输出 Token' }, tokenLabel)
-                          : null,
-                        usage
-                          ? h('span', { className: 'dsh-swarm-badge', 'data-role': 'agy-cache', title: '缓存命中率 = cacheRead / totalInput' }, hitLabel)
-                          : null,
-                        usage && usage.turns > 0
-                          ? h('span', null, '累计 ' + String(usage.turns) + ' 轮 / ' + String(usage.stepCount) + ' 步')
-                          : null
-                      )
-                    : null,
-                  isExternalAgy
-                    ? h('div', { className: 'dsh-swarm-member-actions' },
-                        h('button', {
-                          type: 'button',
-                          className: 'dsh-swarm-card-btn',
-                          'data-action': 'open-acp-monitor',
-                          title: '打开右侧栏 ACP 实时监控（单步 Token 账单 / PID / 停止）',
-                          onClick: () => handleAcpMonitor(member),
-                        }, '查看 ACP 监控 →')
-                      )
-                    : null,
                   member.activity
                     ? h('div', { className: 'dsh-swarm-member-activity' }, '⚡ ' + member.activity)
                     : null,
@@ -3458,7 +3138,7 @@
             throw new Error('Host 端 dsh-swarm.getSwarmModels 服务未就绪');
           }
           // 同 fetchSnapshotOnce：真实宿主的响应带 `{ ok: true, value }` 信封。
-          const response = unwrapRemoteResult(await api.getSwarmModels({ probeAgy: false }));
+          const response = unwrapRemoteResult(await api.getSwarmModels({}));
           if (isPlainObject(response) && response.ok === false) {
             throw new Error(formatErrorMessage(response.error || response));
           }
@@ -3613,7 +3293,6 @@
     summarizeSwarmToolCall,
     openMemberSession,
     openMemberTranscript: openMemberSession,
-    openMemberAcpMonitor,
     createSwarmSettingsSection,
     parseSwarmModelsRequest,
     parseSwarmModelsResult,
@@ -3625,9 +3304,6 @@
     SWARM_SETTINGS_ID,
     SWARM_SETTINGS_ORDER,
     SETTINGS_DEFAULTS,
-    AGY_PHASE_TEXT,
-    formatTokenCount,
-    formatHitRate,
     SwarmClientPlugin,
   };
 

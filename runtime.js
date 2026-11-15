@@ -4,8 +4,8 @@
  * 宿主依赖加载器（零依赖兜底）。
  *
  * DSH 桌面版把 @deepseek-ai/* 运行时依赖打进 app.asar，插件目录之外 require
- * 解析不到；CLI / 便携包布局又各不相同。这里按可选扩展 dsh-agy-acp 的
- * `runtime.js` 思路，用「宿主入口」当解析锚点，而不是硬编码任何安装路径：
+ * 解析不到；CLI / 便携包布局又各不相同。这里用「宿主入口」当解析锚点，
+ * 而不是硬编码任何安装路径：
  *
  *   1) DSH_SWARM_HOST_MODULES 指向的目录（离线单测注入用）；
  *   2) require.main / process.mainModule（宿主主进程入口）及其祖先目录；

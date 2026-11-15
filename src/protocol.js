@@ -15,8 +15,6 @@ const PLUGIN_ID = 'dsh-agy-swarm';
 const SWARM_SETTINGS_ID = 'dsh-agy-swarm';
 const SWARM_SETTINGS_NS = 'settings.dshAgySwarm';
 const SWARM_SETTINGS_ID_LEGACY = 'local-dsh-swarm';
-/** 可选 ACP 扩展包的 npm 包名（未安装时插件必须完全可用）。 */
-const AGY_ACP_PLUGIN_NAME = 'dsh-agy-acp';
 const SWARM_SERVICE_NAME = 'dsh-swarm';
 const SWARM_TYPERT_PACKAGE = 'dsh-swarm';
 const SWARM_RESOURCE_PROTOCOL = 'swarm';
@@ -35,22 +33,6 @@ const SWARM_MODELS_METHOD = 'getSwarmModels';
 const SWARM_TABS = Object.freeze(['feed', 'members', 'graph']);
 const MEMBER_STATES = Object.freeze(['waiting', 'working', 'stopped', 'killed']);
 const WORKSPACE_MODES = Object.freeze(['inherit', 'share']);
-const AGY_BACKEND = 'agy-acp';
-const AGY_MODES = Object.freeze(['accept-edits', 'plan', 'default']);
-/**
- * agy 轮次实时阶段（与可选扩展 dsh-agy-acp 的 onProgress phase 对齐）。
- * 本插件只透传展示，绝不因未知阶段报错：未知值原样保留字符串。
- */
-const AGY_LIVE_PHASES = Object.freeze([
-  'queued',
-  'spawn',
-  'initialize',
-  'load',
-  'new',
-  'configure',
-  'prompt',
-  'settling',
-]);
 
 function isPlainObject(value) {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
@@ -152,75 +134,6 @@ function normalizeChannelSnapshot(raw) {
   };
 }
 
-/**
- * agy 实时阶段快照（JSON-safe，契约 3.2）：`{ runId, phase, pid, activity }`。
- * 成员空闲时为 null；pid 未知记 0（绝不写 undefined / NaN），
- * 客户端据此决定渲染 `PID <pid>` 还是 `宿主托管 · <runId>`。
- */
-function normalizeAgyLive(raw) {
-  if (!isPlainObject(raw)) return null;
-  const phase = coerceString(raw.phase, '').slice(0, 32);
-  if (!phase) return null;
-  return {
-    runId: coerceString(raw.runId, '').slice(0, 64),
-    phase,
-    pid: Number.isSafeInteger(raw.pid) && raw.pid > 0 ? raw.pid : 0,
-    // 活动摘要会进入快照、事件流与下一次模型上下文：推流端统一脱敏兜底。
-    activity: redactSensitiveText(coerceString(raw.activity, ''), { maxChars: 240 }),
-  };
-}
-
-/** 缓存命中率归一化到 0..1（上游可能给 0..1 或 0..100 百分比）。 */
-function normalizeCacheHitRate(raw, cacheRead, totalInput) {
-  let value = 0;
-  if (typeof raw === 'number' && Number.isFinite(raw)) {
-    value = raw >= 0 && raw <= 1 ? raw : raw > 1 && raw <= 100 ? raw / 100 : 0;
-  } else if (totalInput > 0 && cacheRead > 0) {
-    value = cacheRead / totalInput;
-  }
-  return Math.round(Math.min(1, Math.max(0, value)) * 10000) / 10000;
-}
-
-/**
- * 单轮口径的 Token 账单摘要（来自 agy-acp 的 `turnUsageSummary`，JSON-safe）。
- * 与契约的 `lastTurnTokens` 字段一一对应，便于面板直接渲染。
- */
-function normalizeAgyTurnTokens(raw) {
-  if (!isPlainObject(raw)) return null;
-  const totalInput = coerceNonNegInt(raw.totalInput, 0);
-  const cacheRead = Math.min(coerceNonNegInt(raw.cacheRead, 0), totalInput);
-  const totalOutput = coerceNonNegInt(raw.totalOutput, 0);
-  return {
-    stepCount: coerceNonNegInt(raw.stepCount, 0),
-    totalInput,
-    cacheRead,
-    totalOutput,
-    thinking: Math.min(coerceNonNegInt(raw.thinking, 0), totalOutput),
-    cacheHitRate: normalizeCacheHitRate(raw.cacheHitRate, cacheRead, totalInput),
-  };
-}
-
-/**
- * agy 累计 Token 账单（JSON-safe）：从未产生过 usage 时为 null。
- * 旧版 agy-acp（返回值无 turnUsageSummary）永远走 null 分支，完全向后兼容。
- */
-function normalizeAgyUsage(raw) {
-  if (!isPlainObject(raw)) return null;
-  const totalInput = coerceNonNegInt(raw.totalInput, 0);
-  const cacheRead = Math.min(coerceNonNegInt(raw.cacheRead, 0), totalInput);
-  const totalOutput = coerceNonNegInt(raw.totalOutput, 0);
-  return {
-    turns: coerceNonNegInt(raw.turns, 0),
-    stepCount: coerceNonNegInt(raw.stepCount, 0),
-    totalInput,
-    cacheRead,
-    totalOutput,
-    thinking: Math.min(coerceNonNegInt(raw.thinking, 0), totalOutput),
-    cacheHitRate: normalizeCacheHitRate(raw.cacheHitRate, cacheRead, totalInput),
-    lastTurnTokens: normalizeAgyTurnTokens(raw.lastTurnTokens),
-  };
-}
-
 function normalizeMemberSnapshot(raw) {
   const killed = Boolean(raw?.killed || raw?.state === 'killed');
   const rawState = coerceString(raw?.state, 'waiting');
@@ -242,12 +155,6 @@ function normalizeMemberSnapshot(raw) {
     sessionId: coerceString(raw?.sessionId, ''),
     role: coerceString(raw?.role, 'worker'),
     addedBy: coerceString(raw?.addedBy, ''),
-    // 二期：成员后端（'dsh' 原生会话 / 'agy-acp' 外部 ACP 队友）。
-    backend: coerceString(raw?.backend, 'dsh') || 'dsh',
-    // 二期：外部 agy 队友的运行模式、实时阶段与累计 Token 账单（原生成员为零值）。
-    agyMode: AGY_MODES.includes(raw?.agyMode) ? raw.agyMode : '',
-    agyLive: normalizeAgyLive(raw?.agyLive),
-    agyUsage: normalizeAgyUsage(raw?.agyUsage),
     provider,
     model,
     modelDisplay,
@@ -359,21 +266,18 @@ function normalizeSwarmModelEntry(raw) {
   };
 }
 
-/** `getSwarmModels` 请求：`{}` / `undefined` / `{ probeAgy?: boolean }`。 */
+/**
+ * `getSwarmModels` 请求：接受任意 plain object，统一归一化为 `{}`。
+ *
+ * 请求体本身没有任何可配置语义（模型目录只由宿主决定），所以**忽略一切历史字段**：
+ * 旧版 Web 客户端缓存会发送 `{ probeAgy: false }` 这类已被移除的开关，
+ * 把这种请求打成协议错误只会让升级后的设置页莫名拉不到模型目录。
+ * 只有非 plain object（数组 / 字符串 / 数字……）才是真正的协议违约。
+ */
 function parseSwarmModelsRequest(value) {
-  if (value === undefined || value === null) return { probeAgy: false };
-  if (!isPlainObject(value)) {
-    invalidProtocol(SWARM_MODELS_METHOD, 'request', 'expected object');
-  }
-  for (const key of Object.keys(value)) {
-    if (key !== 'probeAgy') {
-      invalidProtocol(SWARM_MODELS_METHOD, 'request', `unexpected key "${key}"`);
-    }
-  }
-  if (value.probeAgy !== undefined && value.probeAgy !== null && typeof value.probeAgy !== 'boolean') {
-    invalidProtocol(SWARM_MODELS_METHOD, 'request', 'probeAgy must be boolean');
-  }
-  return { probeAgy: value.probeAgy === true };
+  if (value === undefined || value === null) return {};
+  if (isPlainObject(value)) return {};
+  invalidProtocol(SWARM_MODELS_METHOD, 'request', 'expected object');
 }
 
 function isValidSwarmModelsResult(value) {
@@ -447,7 +351,6 @@ module.exports = {
   SWARM_SETTINGS_ID,
   SWARM_SETTINGS_NS,
   SWARM_SETTINGS_ID_LEGACY,
-  AGY_ACP_PLUGIN_NAME,
   SWARM_SERVICE_NAME,
   SWARM_TYPERT_PACKAGE,
   SWARM_RESOURCE_PROTOCOL,
@@ -457,9 +360,6 @@ module.exports = {
   SWARM_TABS,
   MEMBER_STATES,
   WORKSPACE_MODES,
-  AGY_BACKEND,
-  AGY_MODES,
-  AGY_LIVE_PHASES,
   SWARM_REMOTE,
   isValidSessionId,
   buildSwarmResourceUri,
@@ -467,10 +367,6 @@ module.exports = {
   createEmptySnapshot,
   normalizeSwarmSnapshot,
   normalizeMemberSnapshot,
-  normalizeAgyLive,
-  normalizeAgyUsage,
-  normalizeAgyTurnTokens,
-  normalizeCacheHitRate,
   isValidSwarmSnapshot,
   parseSwarmRequest,
   parseSwarmResult,

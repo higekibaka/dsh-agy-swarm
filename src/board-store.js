@@ -21,11 +21,8 @@ const crypto = require('node:crypto');
 const {
   MEMBER_STATES,
   WORKSPACE_MODES,
-  AGY_MODES,
   createEmptySnapshot,
   normalizeSwarmSnapshot,
-  normalizeAgyLive,
-  normalizeAgyUsage,
 } = require('./protocol.js');
 
 const RESERVED_NAMES = new Set(['all', 'coordinator']);
@@ -177,34 +174,38 @@ function isMonitorRoleOrName(name, role) {
   return name === 'monitor' || /^monitor-\d+$/.test(String(name || ''));
 }
 
-const MEMBER_BACKENDS = Object.freeze(['dsh', 'agy-acp']);
-
-function nonNegInt(value, fallback = 0) {
-  return Number.isSafeInteger(value) && value >= 0 ? value : fallback;
-}
+/**
+ * 0.1.x 落盘数据里已移除的「外部队友后端」字段前缀。
+ *
+ * 刻意用前缀匹配而不是逐个枚举字面量：旧 JSON 中的后端标记、外部会话 ID、
+ * 实时阶段、用量账单与熔断计数都会被统一丢弃，但已删除的概念不会被重新写进源码。
+ */
+const LEGACY_MEMBER_FIELD_PREFIXES = Object.freeze([
+  'agy',
+  'activation',
+  'consecutive',
+  'circuit',
+]);
 
 /**
- * 二期：规范化成员的后端与 agy-acp 相关持久字段。
- * DSH 原生成员也带上 backend:'dsh' 与零值计数器，读写两端形状一致。
+ * 反序列化旧成员时丢弃已移除的后端字段。
+ *
+ * 既不会进入内存成员对象，也不会被下一次 `_persistState` 写回磁盘；
+ * 旧成员因此被归一化成普通原生 DSH 成员，读旧会话历史绝不抛错。
  */
-function normalizeAgyMemberFields(raw = {}) {
-  const backend = MEMBER_BACKENDS.includes(raw.backend) ? raw.backend : 'dsh';
-  return {
-    backend,
-    agySessionId:
-      typeof raw.agySessionId === 'string' && raw.agySessionId ? raw.agySessionId : null,
-    agyWorkerName: typeof raw.agyWorkerName === 'string' ? raw.agyWorkerName : '',
-    agyMode: AGY_MODES.includes(raw.agyMode) ? raw.agyMode : backend === 'agy-acp' ? 'plan' : '',
-    agyFullAccess: backend === 'agy-acp' && raw.agyFullAccess === true,
-    agyAccessMode: typeof raw.agyAccessMode === 'string' ? raw.agyAccessMode : '',
-    activationEpoch: nonNegInt(raw.activationEpoch, 0),
-    activationCount: nonNegInt(raw.activationCount, 0),
-    consecutivePeerWakes: nonNegInt(raw.consecutivePeerWakes, 0),
-    circuitBreakNotified: raw.circuitBreakNotified === true,
-    // 二期：轮次实时阶段与累计 Token 账单（空闲 / 尚无账单时为 null）。
-    agyLive: backend === 'agy-acp' ? normalizeAgyLive(raw.agyLive) : null,
-    agyUsage: backend === 'agy-acp' ? normalizeAgyUsage(raw.agyUsage) : null,
-  };
+function stripLegacyMemberFields(member) {
+  if (!member || typeof member !== 'object') return member;
+  for (const key of Object.keys(member)) {
+    if (key === 'backend') {
+      delete member[key];
+      continue;
+    }
+    const lower = key.toLowerCase();
+    if (LEGACY_MEMBER_FIELD_PREFIXES.some((prefix) => lower.startsWith(prefix))) {
+      delete member[key];
+    }
+  }
+  return member;
 }
 
 function validateMemberBaseName(name) {
@@ -757,23 +758,24 @@ class BoardStore {
           ? loaded.channels
           : this.state.channels,
       members: Array.isArray(loaded.members)
-        ? loaded.members.map((m) => ({
-            ...m,
-            state:
-              m.killed || m.state === 'killed'
-                ? 'killed'
-                : m.role === 'coordinator' && !isDone
-                  ? 'waiting'
-                  : 'stopped',
-            activity: '',
-            waitFor:
-              m.killed || isDone || !Array.isArray(m.waitFor)
-                ? []
-                : m.waitFor.filter((item) => typeof item === 'string' && item.length > 0),
-            pendingWakeup: m.killed || isDone ? false : Boolean(m.pendingWakeup),
-            pendingModelSync: m.killed ? false : Boolean(m.pendingModelSync),
-            ...normalizeAgyMemberFields(m),
-          }))
+        ? loaded.members.map((m) =>
+            stripLegacyMemberFields({
+              ...m,
+              state:
+                m.killed || m.state === 'killed'
+                  ? 'killed'
+                  : m.role === 'coordinator' && !isDone
+                    ? 'waiting'
+                    : 'stopped',
+              activity: '',
+              waitFor:
+                m.killed || isDone || !Array.isArray(m.waitFor)
+                  ? []
+                  : m.waitFor.filter((item) => typeof item === 'string' && item.length > 0),
+              pendingWakeup: m.killed || isDone ? false : Boolean(m.pendingWakeup),
+              pendingModelSync: m.killed ? false : Boolean(m.pendingModelSync),
+            })
+          )
         : [],
     };
   }
@@ -1184,12 +1186,6 @@ class BoardStore {
     channels = [],
     delegationDepth = 0,
     agentPreset = '',
-    backend = 'dsh',
-    agySessionId = null,
-    agyWorkerName = '',
-    agyMode = '',
-    agyFullAccess = false,
-    agyAccessMode = '',
   }) {
     this._ensureWriter();
     const cleanName = validateMemberBaseName(name);
@@ -1267,15 +1263,6 @@ class BoardStore {
       lastPostTime: '',
       pendingWakeup: false,
       pendingModelSync: false,
-      // 二期：后端与 agy-acp 外部队友字段（DSH 成员为 backend:'dsh' + 零值）。
-      ...normalizeAgyMemberFields({
-        backend,
-        agySessionId,
-        agyWorkerName,
-        agyMode,
-        agyFullAccess,
-        agyAccessMode,
-      }),
     };
     this.state.members.push(member);
     if (this.state.done && resolvedRole !== 'monitor') {
@@ -1298,8 +1285,6 @@ class BoardStore {
     target.killed = true;
     target.state = 'killed';
     target.activity = '';
-    // 契约 3.2：kill 是终态，瞬态阶段必须立刻消失，绝不能残留「生成中」。
-    target.agyLive = null;
     target.waitFor = [];
     target.pendingWakeup = false;
     target.pendingModelSync = false;
@@ -1423,59 +1408,6 @@ class BoardStore {
     if (changed) {
       this._persistState();
     }
-    return member;
-  }
-
-  /**
-   * 二期：更新 agy-acp 成员的持久字段（会话续聊 ID、激活代次与熔断计数）。
-   * 只接受白名单字段，绝不触碰 state / killed 等生命周期字段。
-   */
-  updateMemberAgyState(sessionId, patch = {}) {
-    if (!this.lockHeld) this._loadIfPresent();
-    const precheck = this.getMemberBySessionId(sessionId);
-    if (!precheck) return null;
-    this._ensureWriter();
-    const member = this.getMemberBySessionId(sessionId);
-    if (!member) return null;
-    let changed = false;
-    const assign = (key, value) => {
-      if (member[key] !== value) {
-        member[key] = value;
-        changed = true;
-      }
-    };
-    // 对象字段按 JSON 值比较：onProgress 高频刷新时避免每次都重写 state.json。
-    const assignJson = (key, value) => {
-      if (JSON.stringify(member[key] ?? null) === JSON.stringify(value ?? null)) return;
-      member[key] = value;
-      changed = true;
-    };
-    if (patch.agySessionId !== undefined) {
-      assign(
-        'agySessionId',
-        typeof patch.agySessionId === 'string' && patch.agySessionId ? patch.agySessionId : null
-      );
-    }
-    if (typeof patch.agyWorkerName === 'string') assign('agyWorkerName', patch.agyWorkerName);
-    if (patch.agyMode !== undefined && AGY_MODES.includes(patch.agyMode)) {
-      assign('agyMode', patch.agyMode);
-    }
-    if (patch.agyFullAccess !== undefined) assign('agyFullAccess', patch.agyFullAccess === true);
-    if (typeof patch.agyAccessMode === 'string') assign('agyAccessMode', patch.agyAccessMode);
-    for (const key of ['activationEpoch', 'activationCount', 'consecutivePeerWakes']) {
-      if (patch[key] !== undefined) assign(key, nonNegInt(patch[key], member[key] || 0));
-    }
-    if (patch.circuitBreakNotified !== undefined) {
-      assign('circuitBreakNotified', patch.circuitBreakNotified === true);
-    }
-    // 二期：实时阶段（null 表示空闲）与累计 Token 账单（整体替换为归一化后的 JSON 值）。
-    if (patch.agyLive !== undefined && member.backend === 'agy-acp') {
-      assignJson('agyLive', normalizeAgyLive(patch.agyLive));
-    }
-    if (patch.agyUsage !== undefined && member.backend === 'agy-acp') {
-      assignJson('agyUsage', normalizeAgyUsage(patch.agyUsage));
-    }
-    if (changed) this._persistState();
     return member;
   }
 
@@ -2071,15 +2003,6 @@ class BoardStore {
           last_post_time: m.lastPostTime || '',
           pending_wakeup: Boolean(m.pendingWakeup),
           pending_model_sync: Boolean(m.pendingModelSync),
-          ...(m.backend === 'agy-acp'
-            ? {
-                backend: 'agy-acp',
-                agy_mode: m.agyMode || 'plan',
-                activation_count: m.activationCount || 0,
-                ...(normalizeAgyLive(m.agyLive) ? { agy_live: normalizeAgyLive(m.agyLive) } : {}),
-                ...(normalizeAgyUsage(m.agyUsage) ? { agy_usage: normalizeAgyUsage(m.agyUsage) } : {}),
-              }
-            : {}),
           ...(m.activity ? { activity: m.activity } : {}),
           ...(m.lastError ? { last_error: m.lastError } : {}),
         })),
@@ -2347,9 +2270,8 @@ module.exports = {
   parseMessageDoorbells,
   isMonitorRoleOrName,
   isDonePost,
-  MEMBER_BACKENDS,
-  AGY_MODES,
-  normalizeAgyMemberFields,
+  LEGACY_MEMBER_FIELD_PREFIXES,
+  stripLegacyMemberFields,
   BoardStore,
   SwarmStoreManager,
 };
