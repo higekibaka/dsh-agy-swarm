@@ -94,7 +94,7 @@ test('成员 error/activity 写入点都经过脱敏', () => {
   assert.match(indexSource, /activity: redactActivityText\(/, 'activity 写入必须脱敏');
 });
 
-test('插件身份：清单 0.2.0、无外部后端依赖、patch 与设置页命名空间一致', () => {
+test('插件身份：清单 0.2.1、无外部后端依赖、patch 与设置页命名空间一致', () => {
   assert.equal(protocol.PLUGIN_ID, 'dsh-agy-swarm');
   assert.equal(protocol.SWARM_SETTINGS_ID, 'dsh-agy-swarm');
   assert.equal(protocol.SWARM_SETTINGS_NS, 'settings.dshAgySwarm');
@@ -103,7 +103,7 @@ test('插件身份：清单 0.2.0、无外部后端依赖、patch 与设置页�
 
   const pkg = JSON.parse(fs.readFileSync(path.join(PLUGIN_ROOT, 'package.json'), 'utf8'));
   assert.equal(pkg.name, 'dsh-agy-swarm');
-  assert.equal(pkg.version, '0.2.0', '版本号必须升级为 0.2.0');
+  assert.equal(pkg.version, '0.2.1', '版本号必须升级为 0.2.1');
   assert.equal(pkg.private, undefined, '公开发布版不得保留 private');
   assert.equal(pkg.license, 'MIT');
   assert.equal(pkg.author, 'higekibaka');
@@ -178,6 +178,12 @@ test('createSwarmTools：工具 Schema 通用，且不再含外部模式字段�
   const toolText = JSON.stringify(swarmTool);
   assert.ok(toolText.includes('configured in this DSH installation'), 'model 说明必须保持 DSH 通用路由表述');
   assert.ok(toolText.includes('"model"'), 'model 参数必须存在');
+  assert.equal(built.swarmTool.deferLoading, true, '顶层 swarm 入口延迟加载（支持 Tool Retrieval 时按需召回）');
+  assert.equal(built.postMessageTool.deferLoading, false, '看板 post_message 活跃时必须常驻');
+  assert.equal(built.readBoardTool.deferLoading, false, '看板 read_board 活跃时必须常驻');
+  assert.equal(built.swarmWaitTool.deferLoading, false, '看板 swarm_wait 活跃时必须常驻');
+  assert.equal(built.scheduleTool.deferLoading, false, '监控 schedule 在 monitor 会话中必须常驻');
+  assert.equal(built.manageTaskTool.deferLoading, false, '监控 manage_task 在 monitor 会话中必须常驻');
 });
 
 test('仓库文本不留个人路径、私有模型清单与兄弟目录引用（含转义与正斜杠变体）', () => {

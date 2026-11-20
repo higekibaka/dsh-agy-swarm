@@ -473,6 +473,7 @@ function buildToolCompat(options) {
     tool = {
       name: dshInput.name,
       description: dshInput.description,
+      ...(typeof dshInput.deferLoading === 'boolean' ? { deferLoading: dshInput.deferLoading } : {}),
       parameters: {
         type: 'object',
         properties,
@@ -498,6 +499,14 @@ function buildToolCompat(options) {
     if (dshInput.presentCall) tool.presentCall = dshInput.presentCall;
     if (dshInput.presentResult) tool.presentResult = dshInput.presentResult;
     if (dshInput.isConcurrencySafe) tool.isConcurrencySafe = dshInput.isConcurrencySafe;
+  }
+
+  if (typeof dshInput.deferLoading === 'boolean' && !Object.hasOwn(tool, 'deferLoading')) {
+    Object.defineProperty(tool, 'deferLoading', {
+      value: dshInput.deferLoading,
+      enumerable: true,
+      configurable: true,
+    });
   }
 
   const mode =
@@ -3017,6 +3026,7 @@ class SwarmHostController {
 function createSwarmTools(controller) {
   const swarmTool = buildToolCompat({
     name: 'swarm',
+    deferLoading: true,
     description:
       'Manage the Swarm of agents collaborating on a shared message board. Actions: status, models, add, model, kill, title, channel.',
     isConcurrencySafe: () => false,
@@ -3142,6 +3152,7 @@ function createSwarmTools(controller) {
 
   const postMessageTool = buildToolCompat({
     name: 'post_message',
+    deferLoading: false,
     description:
       'Post a message to the shared Swarm message board. Include @<name>, @<prefix>, @#<channel>, or @all to wake sleeping recipients.',
     isConcurrencySafe: () => false,
@@ -3166,6 +3177,7 @@ function createSwarmTools(controller) {
 
   const readBoardTool = buildToolCompat({
     name: 'read_board',
+    deferLoading: false,
     description:
       'Read messages from the shared Swarm message board (oldest first). Pass the last seq you read as `since` to read incremental updates.',
     isConcurrencySafe: () => true,
@@ -3202,6 +3214,7 @@ function createSwarmTools(controller) {
 
   const swarmWaitTool = buildToolCompat({
     name: 'swarm_wait',
+    deferLoading: false,
     description:
       'Sleep at zero token cost until a board message arrives after `since` matching your wake filter. Concludes your turn immediately (exclusive barrier drains parallel post_message first).',
     isConcurrencySafe: () => false,
@@ -3254,6 +3267,7 @@ function createSwarmTools(controller) {
   // resolves the calling monitor, so a non-monitor call is refused loudly.
   const scheduleTool = buildToolCompat({
     name: 'schedule',
+    deferLoading: false,
     description:
       'Schedule a Swarm monitor recurring cron job (CronExpression) or one-shot timer (DurationSeconds) that wakes this monitor session.',
     isConcurrencySafe: () => false,
@@ -3285,6 +3299,7 @@ function createSwarmTools(controller) {
 
   const manageTaskTool = buildToolCompat({
     name: 'manage_task',
+    deferLoading: false,
     description: 'List or kill active Swarm monitor scheduled tasks.',
     isConcurrencySafe: () => false,
     parameters: {

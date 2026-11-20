@@ -874,6 +874,12 @@ test('3. Host lifecycle: dynamic visibility, v3 descriptor/catalog, cold resume,
     assert.equal(registeredTools.get('swarm').tool.isConcurrencySafe({}), false);
     assert.equal(registeredTools.get('post_message').tool.isConcurrencySafe({}), false);
     assert.equal(registeredTools.get('swarm_wait').tool.isConcurrencySafe({}), false);
+    assert.equal(registeredTools.get('swarm').tool.deferLoading, true);
+    assert.equal(registeredTools.get('post_message').tool.deferLoading, false);
+    assert.equal(registeredTools.get('read_board').tool.deferLoading, false);
+    assert.equal(registeredTools.get('swarm_wait').tool.deferLoading, false);
+    assert.equal(registeredTools.get('schedule').tool.deferLoading, false);
+    assert.equal(registeredTools.get('manage_task').tool.deferLoading, false);
 
     assert.ok(registeredSkills.has('swarm'));
     assert.ok(registeredSkills.has('swarm-monitor'));
